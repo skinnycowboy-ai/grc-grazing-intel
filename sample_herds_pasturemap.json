@@ -1,0 +1,82 @@
+[
+  {
+    "operation_id": "ranch_001",
+    "pasture_id": "paddock_3",
+    "name": "North Paddock 3 - Spring herd",
+    "herd": {
+      "animal_count": 120,
+      "animal_type": "beef_cattle",
+      "class": "yearling",
+      "average_weight_kg": 380,
+      "daily_intake_kg_per_head": 11.5,
+      "average_daily_gain_kg": 0.85,
+      "utilization_target_pct": 50
+    },
+    "effective_date": "2025-03-01",
+    "notes": "Yearlings, spring rotation."
+  },
+  {
+    "operation_id": "ranch_001",
+    "pasture_id": "paddock_south_1",
+    "name": "South Paddock 1 - Cow-calf pairs",
+    "herd": {
+      "animal_count": 85,
+      "animal_type": "beef_cattle",
+      "class": "cow_calf",
+      "average_weight_kg": 550,
+      "daily_intake_kg_per_head": 14.0,
+      "average_daily_gain_kg": 0.0,
+      "utilization_target_pct": 50
+    },
+    "effective_date": "2025-05-15",
+    "notes": "Cow-calf pairs, higher intake."
+  },
+  {
+    "operation_id": "ranch_001",
+    "pasture_id": "paddock_south_1",
+    "name": "South Paddock 1 - Fall stockers",
+    "herd": {
+      "animal_count": 200,
+      "animal_type": "beef_cattle",
+      "class": "stocker",
+      "average_weight_kg": 320,
+      "daily_intake_kg_per_head": 9.2,
+      "average_daily_gain_kg": 0.9,
+      "utilization_target_pct": 55
+    },
+    "effective_date": "2025-09-01",
+    "notes": "Stocker cattle, fall grazing."
+  },
+  {
+    "operation_id": "ranch_002",
+    "pasture_id": "paddock_east_2",
+    "name": "East Paddock 2 - Mature cows",
+    "herd": {
+      "animal_count": 45,
+      "animal_type": "beef_cattle",
+      "class": "mature_cow",
+      "average_weight_kg": 600,
+      "daily_intake_kg_per_head": 13.0,
+      "average_daily_gain_kg": 0.0,
+      "utilization_target_pct": 45
+    },
+    "effective_date": "2025-04-01",
+    "notes": "Smaller herd, conservative utilization."
+  },
+  {
+    "operation_id": "ranch_002",
+    "pasture_id": "paddock_east_2",
+    "name": "East Paddock 2 - Summer rotation",
+    "herd": {
+      "animal_count": 60,
+      "animal_type": "beef_cattle",
+      "class": "yearling",
+      "average_weight_kg": 400,
+      "daily_intake_kg_per_head": 11.0,
+      "average_daily_gain_kg": 0.8,
+      "utilization_target_pct": 50
+    },
+    "effective_date": "2025-07-01",
+    "notes": "Summer rotation, yearlings."
+  }
+]

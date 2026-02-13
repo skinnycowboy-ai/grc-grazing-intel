@@ -1,0 +1,1 @@
+{"type":"Feature","properties":{"name":"South Paddock 1","ranch_id":"ranch_001","pasture_id":"paddock_south_1","area_ha":62.8},"geometry":{"type":"Polygon","coordinates":[[[-105.085,40.572],[-105.079,40.572],[-105.079,40.578],[-105.085,40.578],[-105.085,40.572]]]},"crs":{"type":"name","properties":{"name":"urn:ogc:def:crs:OGC:1.3:CRS84"}}}
