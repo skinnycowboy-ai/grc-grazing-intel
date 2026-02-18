@@ -1,0 +1,35 @@
+[project]
+name = "grc-grazing-intel"
+version = "0.1.0"
+description = "Production-grade grazing intelligence pipeline (GRC take-home Part 1)."
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi==0.115.6",
+  "uvicorn==0.34.0",
+  "httpx==0.27.2",
+  "pydantic==2.10.3",
+  "typer==0.15.1",
+  "orjson==3.10.12",
+  "shapely==2.0.6",
+  "pyproj==3.7.0",
+  "prometheus-client==0.21.1",
+  "click==8.1.7",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==8.3.4",
+  "ruff==0.8.4",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["out"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
