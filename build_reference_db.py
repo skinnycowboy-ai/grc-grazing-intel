@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-import sqlite3
 import json
-from pathlib import Path
+import sqlite3
 from datetime import datetime, timedelta
+from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parent / "pasture_reference.db"
 SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
@@ -61,7 +61,9 @@ def _rap_rows(boundary_id: str, now: str, area_ha: float):
         cover = min(95, 15 + month * 4 + (i % 3) * 2)
         ndvi = 0.3 + (month / 12) * 0.5 + (i % 4) * 0.02
         ndvi = min(0.85, ndvi)
-        rows.append((boundary_id, d, round(biomass, 1), round(cover, 1), round(ndvi, 3), "RAP_2024", now))
+        rows.append(
+            (boundary_id, d, round(biomass, 1), round(cover, 1), round(ndvi, 3), "RAP_2024", now)
+        )
     return rows
 
 
@@ -74,7 +76,9 @@ def _weather_rows(boundary_id: str, now: str, start_date: datetime, num_days: in
         temp_max = 12 + (i % 7) + (i // 7) * 2
         temp_min = temp_max - 8
         wind = 10 + (i % 5) * 2
-        rows.append((boundary_id, d, lat, lon, precip, temp_max, temp_min, wind, "OpenMeteo_v1", now))
+        rows.append(
+            (boundary_id, d, lat, lon, precip, temp_max, temp_min, wind, "OpenMeteo_v1", now)
+        )
     return rows
 
 
@@ -94,14 +98,35 @@ def main():
         """INSERT INTO model_versions (version_id, description, parameters_json, deployed_at, deprecated_at, created_at)
            VALUES (?, ?, ?, ?, ?, ?)""",
         [
-            ("days_remaining_v1", "Available forage / daily consumption", '{"utilization_pct": 50}', "2024-01-15T00:00:00Z", None, "2024-01-10T00:00:00Z"),
-            ("days_remaining_v2", "Same with weather stress factor", '{"utilization_pct": 50, "weather_stress_factor": 0.95}', "2024-06-01T00:00:00Z", None, "2024-05-20T00:00:00Z"),
-            ("config_2024q1", "Q1 2024 herd and boundary config", "{}", "2024-01-01T00:00:00Z", None, "2023-12-15T00:00:00Z"),
+            (
+                "days_remaining_v1",
+                "Available forage / daily consumption",
+                '{"utilization_pct": 50}',
+                "2024-01-15T00:00:00Z",
+                None,
+                "2024-01-10T00:00:00Z",
+            ),
+            (
+                "days_remaining_v2",
+                "Same with weather stress factor",
+                '{"utilization_pct": 50, "weather_stress_factor": 0.95}',
+                "2024-06-01T00:00:00Z",
+                None,
+                "2024-05-20T00:00:00Z",
+            ),
+            (
+                "config_2024q1",
+                "Q1 2024 herd and boundary config",
+                "{}",
+                "2024-01-01T00:00:00Z",
+                None,
+                "2023-12-15T00:00:00Z",
+            ),
         ],
     )
 
     variants = ["north", "south", "east"]
-    for (filename, boundary_id), variant in zip(BOUNDARY_FILES, variants):
+    for (filename, boundary_id), variant in zip(BOUNDARY_FILES, variants, strict=False):
         geo_path = ref_dir / filename
         if not geo_path.exists():
             continue
@@ -182,10 +207,54 @@ def main():
         )
 
     runs = [
-        ("run_20240301_001", "boundary_north_paddock_3", "2024-01-01", "2024-12-31", "nrcs,rap,openmeteo,herd", "completed", now, now, 42, None),
-        ("run_20240301_002", "boundary_south_paddock_1", "2024-01-01", "2024-12-31", "nrcs,rap,openmeteo,herd", "completed", now, now, 58, None),
-        ("run_20240301_003", "boundary_east_paddock_2", "2024-01-01", "2024-12-31", "nrcs,rap,openmeteo,herd", "completed", now, now, 51, None),
-        ("run_20240615_001", None, "2024-06-01", "2024-08-31", "rap,openmeteo", "failed", now, None, None, "OpenMeteo rate limit exceeded"),
+        (
+            "run_20240301_001",
+            "boundary_north_paddock_3",
+            "2024-01-01",
+            "2024-12-31",
+            "nrcs,rap,openmeteo,herd",
+            "completed",
+            now,
+            now,
+            42,
+            None,
+        ),
+        (
+            "run_20240301_002",
+            "boundary_south_paddock_1",
+            "2024-01-01",
+            "2024-12-31",
+            "nrcs,rap,openmeteo,herd",
+            "completed",
+            now,
+            now,
+            58,
+            None,
+        ),
+        (
+            "run_20240301_003",
+            "boundary_east_paddock_2",
+            "2024-01-01",
+            "2024-12-31",
+            "nrcs,rap,openmeteo,herd",
+            "completed",
+            now,
+            now,
+            51,
+            None,
+        ),
+        (
+            "run_20240615_001",
+            None,
+            "2024-06-01",
+            "2024-08-31",
+            "rap,openmeteo",
+            "failed",
+            now,
+            None,
+            None,
+            "OpenMeteo rate limit exceeded",
+        ),
     ]
     for r in runs:
         conn.execute(
@@ -195,9 +264,13 @@ def main():
             r,
         )
 
-    input_versions = json.dumps({"rap": "RAP_2024", "nrcs": "gSSURGO_2024", "weather": "OpenMeteo_v1"})
+    input_versions = json.dumps(
+        {"rap": "RAP_2024", "nrcs": "gSSURGO_2024", "weather": "OpenMeteo_v1"}
+    )
     boundary_id = "boundary_north_paddock_3"
-    herd_config_id = next((hcid for hcid, bid in herd_config_ids if bid == boundary_id), herd_config_ids[0][0])
+    herd_config_id = next(
+        (hcid for hcid, bid in herd_config_ids if bid == boundary_id), herd_config_ids[0][0]
+    )
     area_ha = 45.2
     available_forage_kg = area_ha * 1200
     daily_consumption = 120 * 11.5
@@ -207,7 +280,19 @@ def main():
         """INSERT INTO grazing_recommendations
            (boundary_id, herd_config_id, calculation_date, available_forage_kg, daily_consumption_kg, days_of_grazing_remaining, recommended_move_date, model_version, config_version, input_data_versions_json, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (boundary_id, herd_config_id, "2024-03-15", round(available_forage_kg, 1), daily_consumption, round(days_remaining, 1), move_date, "days_remaining_v1", "config_2024q1", input_versions, now),
+        (
+            boundary_id,
+            herd_config_id,
+            "2024-03-15",
+            round(available_forage_kg, 1),
+            daily_consumption,
+            round(days_remaining, 1),
+            move_date,
+            "days_remaining_v1",
+            "config_2024q1",
+            input_versions,
+            now,
+        ),
     )
     boundary_id = "boundary_south_paddock_1"
     herd_config_id = next((hcid for hcid, bid in herd_config_ids if bid == boundary_id), None)
@@ -216,12 +301,26 @@ def main():
         available_forage_kg = area_ha * 1100
         daily_consumption = 85 * 14.0
         days_remaining = available_forage_kg / daily_consumption
-        move_date = (datetime(2024, 5, 20) + timedelta(days=int(days_remaining))).strftime("%Y-%m-%d")
+        move_date = (datetime(2024, 5, 20) + timedelta(days=int(days_remaining))).strftime(
+            "%Y-%m-%d"
+        )
         conn.execute(
             """INSERT INTO grazing_recommendations
                (boundary_id, herd_config_id, calculation_date, available_forage_kg, daily_consumption_kg, days_of_grazing_remaining, recommended_move_date, model_version, config_version, input_data_versions_json, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (boundary_id, herd_config_id, "2024-05-20", round(available_forage_kg, 1), daily_consumption, round(days_remaining, 1), move_date, "days_remaining_v1", "config_2024q1", input_versions, now),
+            (
+                boundary_id,
+                herd_config_id,
+                "2024-05-20",
+                round(available_forage_kg, 1),
+                daily_consumption,
+                round(days_remaining, 1),
+                move_date,
+                "days_remaining_v1",
+                "config_2024q1",
+                input_versions,
+                now,
+            ),
         )
     boundary_id = "boundary_east_paddock_2"
     herd_config_id = next((hcid for hcid, bid in herd_config_ids if bid == boundary_id), None)
@@ -230,12 +329,26 @@ def main():
         available_forage_kg = area_ha * 1300
         daily_consumption = 45 * 13.0
         days_remaining = available_forage_kg / daily_consumption
-        move_date = (datetime(2024, 4, 10) + timedelta(days=int(days_remaining))).strftime("%Y-%m-%d")
+        move_date = (datetime(2024, 4, 10) + timedelta(days=int(days_remaining))).strftime(
+            "%Y-%m-%d"
+        )
         conn.execute(
             """INSERT INTO grazing_recommendations
                (boundary_id, herd_config_id, calculation_date, available_forage_kg, daily_consumption_kg, days_of_grazing_remaining, recommended_move_date, model_version, config_version, input_data_versions_json, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (boundary_id, herd_config_id, "2024-04-10", round(available_forage_kg, 1), daily_consumption, round(days_remaining, 1), move_date, "days_remaining_v2", "config_2024q1", input_versions, now),
+            (
+                boundary_id,
+                herd_config_id,
+                "2024-04-10",
+                round(available_forage_kg, 1),
+                daily_consumption,
+                round(days_remaining, 1),
+                move_date,
+                "days_remaining_v2",
+                "config_2024q1",
+                input_versions,
+                now,
+            ),
         )
 
     dq_rows = [
@@ -248,7 +361,14 @@ def main():
         ("run_20240301_003", "nrcs_response_complete", "ingestion", 1, '{"records": 2}', now),
         ("run_20240301_003", "rap_no_stale", "freshness", 1, '{"latest_date": "2024-09-17"}', now),
         ("run_20240301_003", "herd_config_valid", "validation", 1, '{"animal_count": 45}', now),
-        ("run_20240615_001", "openmeteo_available", "ingestion", 0, '{"error": "rate limit exceeded"}', now),
+        (
+            "run_20240615_001",
+            "openmeteo_available",
+            "ingestion",
+            0,
+            '{"error": "rate limit exceeded"}',
+            now,
+        ),
         ("run_20240615_001", "rap_no_stale", "freshness", 1, '{"latest_date": "2024-08-01"}', now),
     ]
     conn.executemany(
