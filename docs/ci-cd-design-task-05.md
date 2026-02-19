@@ -316,18 +316,3 @@ flowchart TD
 - “Every output is traceable to **git_sha + logic/config versions + input hashes + source timestamps**.”
 
 ---
-
-## 11) AI Tools Used (for consistency with repo transparency)
-
-- **Tool:** OpenAI ChatGPT/Codex, Anthropic Claude Code
-
-  **Purpose:** Design review and articulation of CI/CD safety patterns (tests, rollout/rollback, provenance).
-
-  **What I refined (MTI):**
-  - Anchored the design to MRV-grade traceability (immutable artifacts, promotion without rebuild, provenance fields).
-  - Chose pragmatic runtime options (ECS default + ROSA as OpenShift-aligned alternative) with explicit cost/safety tradeoffs.
-  - Defined concrete rollback triggers including business guardrails, not just infrastructure metrics.
-
-  **What I verified manually (MTI):**
-  - Confirmed the proposed test layers map to actual repo primitives (unit/integration/golden, DB join semantics, API contracts).
-  - Ensured the deployment design supports deterministic replay and audit narratives via `run_id` and version metadata.
