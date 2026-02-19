@@ -17,7 +17,7 @@ class CheckResult:
 
 
 def check_herd_config_valid(herd: dict) -> CheckResult:
-    problems = []
+    problems: list[str] = []
     if int(herd.get("animal_count", 0)) <= 0:
         problems.append("animal_count must be > 0")
     if float(herd.get("daily_intake_kg_per_head", 0.0)) <= 0.0:
@@ -31,6 +31,48 @@ def check_has_rap_for_boundary(conn, *, boundary_id: str) -> CheckResult:
     )
     n = int(row["n"]) if row else 0
     return CheckResult("rap_present", "completeness", n > 0, {"count": n})
+
+
+def check_rap_freshness(
+    conn, *, boundary_id: str, timeframe_end: str, cfg: PipelineConfig
+) -> CheckResult:
+    """Fail if RAP composites are too stale relative to timeframe_end."""
+    end = parse_date(timeframe_end)
+    row = exec_one(
+        conn,
+        "SELECT MAX(composite_date) AS max_date, COUNT(*) AS n FROM rap_biomass WHERE boundary_id=?",
+        (boundary_id,),
+    )
+    max_date = row["max_date"] if row else None
+    n = int(row["n"]) if row else 0
+
+    if not max_date:
+        return CheckResult(
+            "rap_fresh_enough",
+            "freshness",
+            False,
+            {
+                "max_composite_date": None,
+                "staleness_days": None,
+                "max_allowed_days": cfg.rap_stale_days,
+                "count": n,
+            },
+        )
+
+    stale_days = (end - parse_date(max_date)).days
+    passed = (n > 0) and (stale_days <= cfg.rap_stale_days)
+
+    return CheckResult(
+        "rap_fresh_enough",
+        "freshness",
+        passed,
+        {
+            "max_composite_date": max_date,
+            "staleness_days": stale_days,
+            "max_allowed_days": cfg.rap_stale_days,
+            "count": n,
+        },
+    )
 
 
 def check_has_soil_for_boundary(conn, *, boundary_id: str) -> CheckResult:
@@ -59,6 +101,98 @@ def check_weather_freshness(
         "freshness",
         passed,
         {"max_forecast_date": max_date, "min_expected": min_expected, "count": n},
+    )
+
+
+def check_weather_response_complete(
+    conn,
+    *,
+    boundary_id: str,
+    start: str | None = None,
+    end: str | None = None,
+    source_version: str | None = None,
+) -> CheckResult:
+    """
+    Back-compat for existing tests:
+    Verifies Open-Meteo ingestion returned a complete daily response for the requested window.
+
+    If start/end provided:
+      - expects COUNT(DISTINCT forecast_date) == number of days in [start,end]
+      - expects min_date==start and max_date==end
+
+    If start/end not provided:
+      - falls back to “at least one row exists” for boundary_id (and optional source_version).
+    """
+    where = "boundary_id=?"
+    params: list[object] = [boundary_id]
+
+    if source_version:
+        where += " AND source_version=?"
+        params.append(source_version)
+
+    if start and end:
+        s = parse_date(start)
+        e = parse_date(end)
+        expected = (e - s).days + 1
+
+        where_window = where + " AND forecast_date BETWEEN ? AND ?"
+        params_window = params + [start, end]
+
+        row = exec_one(
+            conn,
+            f"""
+            SELECT
+              COUNT(DISTINCT forecast_date) AS n,
+              MIN(forecast_date) AS min_date,
+              MAX(forecast_date) AS max_date
+            FROM weather_forecasts
+            WHERE {where_window}
+            """,
+            tuple(params_window),
+        )
+        n = int(row["n"]) if row and row["n"] is not None else 0
+        min_date = row["min_date"] if row else None
+        max_date = row["max_date"] if row else None
+
+        passed = (n == expected) and (min_date == start) and (max_date == end)
+        return CheckResult(
+            "weather_response_complete",
+            "completeness",
+            passed,
+            {
+                "expected_days": expected,
+                "rows_distinct_days": n,
+                "min_date": min_date,
+                "max_date": max_date,
+                "start": start,
+                "end": end,
+                "source_version": source_version,
+            },
+        )
+
+    row = exec_one(
+        conn,
+        f"""
+        SELECT
+          COUNT(*) AS n,
+          MIN(forecast_date) AS min_date,
+          MAX(forecast_date) AS max_date
+        FROM weather_forecasts
+        WHERE {where}
+        """,
+        tuple(params),
+    )
+    n = int(row["n"]) if row and row["n"] is not None else 0
+    return CheckResult(
+        "weather_response_complete",
+        "completeness",
+        n > 0,
+        {
+            "rows": n,
+            "min_date": row["min_date"] if row else None,
+            "max_date": row["max_date"] if row else None,
+            "source_version": source_version,
+        },
     )
 
 
@@ -95,8 +229,8 @@ def check_daily_features_complete(conn, *, boundary_id: str, start: str, end: st
     )
 
     # Pass criteria:
-    # - we produced a complete daily frame (n == expected)
-    # - weather is present for all days (weather_missing == 0)
+    # - complete daily frame (n == expected)
+    # - weather present for all days (weather_missing == 0)
     # - RAP isn't totally absent for the entire frame (rap_missing < expected)
     passed = (n == expected) and (weather_missing == 0) and (rap_missing < expected)
 

@@ -1,8 +1,10 @@
 # src/grc_pipeline/cli.py
 from __future__ import annotations
 
+import inspect
 import json
 import uuid
+from datetime import timedelta
 from pathlib import Path
 
 import typer
@@ -18,8 +20,12 @@ from .quality.checks import (
     check_has_rap_for_boundary,
     check_has_soil_for_boundary,
     check_herd_config_valid,
+    check_rap_freshness,
     check_weather_freshness,
+    check_weather_response_complete,
 )
+
+from .quality.monitoring import run_output_monitoring
 from .store.db import (
     db_conn,
     exec_one,
@@ -69,6 +75,50 @@ def _stable_herd_id(boundary_id: str, herd_row: dict) -> str:
     return sha256_text(stable_json_dumps(key))[:24]
 
 
+def _load_boundary_with_optional_crs(
+    boundary_geojson: str,
+    *,
+    boundary_id: str | None,
+    boundary_name: str | None,
+    boundary_crs: str,
+):
+    """Call load_boundary_geojson with whichever CRS kwarg exists (back-compat)."""
+    sig = inspect.signature(load_boundary_geojson)
+    kwargs = {"boundary_id": boundary_id, "name": boundary_name}
+    if "input_crs" in sig.parameters:
+        kwargs["input_crs"] = boundary_crs
+    elif "boundary_crs" in sig.parameters:
+        kwargs["boundary_crs"] = boundary_crs
+    # else: older version has no CRS transform support
+    return load_boundary_geojson(boundary_geojson, **kwargs)
+
+
+def _materialize_features_with_compat_kwargs(
+    conn,
+    *,
+    boundary_id: str,
+    start: str,
+    end: str,
+    weather_source_version: str,
+    created_at: str,
+):
+    sig = inspect.signature(materialize_boundary_daily_features)
+    kwargs = {
+        "conn": conn,
+        "boundary_id": boundary_id,
+        "start": start,
+        "end": end,
+        "created_at": created_at,
+    }
+    if "weather_source_version" in sig.parameters:
+        kwargs["weather_source_version"] = weather_source_version
+    elif "source_version" in sig.parameters:
+        kwargs["source_version"] = weather_source_version
+    elif "weather_version" in sig.parameters:
+        kwargs["weather_version"] = weather_source_version
+    return materialize_boundary_daily_features(**kwargs)
+
+
 @app.command()
 def ingest(
     db: str = typer.Option(...),
@@ -89,11 +139,11 @@ def ingest(
     run_id = str(uuid.uuid4())
     started_at = utc_now_iso()
 
-    boundary = load_boundary_geojson(
+    boundary = _load_boundary_with_optional_crs(
         boundary_geojson,
         boundary_id=boundary_id,
-        name=boundary_name,
-        input_crs=boundary_crs,
+        boundary_name=boundary_name,
+        boundary_crs=boundary_crs,
     )
 
     sources = [
@@ -143,6 +193,7 @@ def ingest(
                 source_file=str(Path(boundary_geojson).name),
             )
 
+            # Herd ingest: filter to pasture for THIS boundary run, attach boundary_id, stable IDs.
             all_herds = load_herd_configs(herds_json, valid_from=start)
             herds: list[dict] = []
             for h in all_herds:
@@ -172,7 +223,8 @@ def ingest(
                 source_version=cfg.openmeteo_source_version,
             )
 
-            feat_res = materialize_boundary_daily_features(
+            # Materialize static+time-series join for timeframe
+            feat_res = _materialize_features_with_compat_kwargs(
                 conn,
                 boundary_id=boundary.boundary_id,
                 start=start,
@@ -180,8 +232,9 @@ def ingest(
                 weather_source_version=cfg.openmeteo_source_version,
                 created_at=utc_now_iso(),
             )
-            features_n = feat_res.inserted
+            features_n = int(getattr(feat_res, "inserted", 0))
 
+            # DQ checks — use the first filtered herd (if any)
             first = herds[0] if herds else {}
             herd_for_check = {
                 "animal_count": int(first.get("animal_count") or 0),
@@ -191,9 +244,19 @@ def ingest(
             checks = [
                 check_herd_config_valid(herd_for_check),
                 check_has_rap_for_boundary(conn, boundary_id=boundary.boundary_id),
+                check_rap_freshness(
+                    conn, boundary_id=boundary.boundary_id, timeframe_end=end, cfg=cfg
+                ),
                 check_has_soil_for_boundary(conn, boundary_id=boundary.boundary_id),
                 check_weather_freshness(
                     conn, boundary_id=boundary.boundary_id, timeframe_end=end, cfg=cfg
+                ),
+                check_weather_response_complete(
+                    conn,
+                    boundary_id=boundary.boundary_id,
+                    start=start,
+                    end=end,
+                    source_version=cfg.openmeteo_source_version,
                 ),
                 check_daily_features_complete(
                     conn, boundary_id=boundary.boundary_id, start=start, end=end
@@ -220,6 +283,7 @@ def ingest(
                 records_ingested=int(herd_count + weather_n + features_n + 1),
                 error_message=None,
             )
+
         except Exception as e:
             finalize_ingestion_run(
                 conn,
@@ -243,12 +307,7 @@ def compute(
     logic_version: str = typer.Option("days_remaining:v1"),
     manifest_out: str = typer.Option("out/manifests"),
 ):
-    """
-    Task 2: deployed logic pattern.
-
-    Idempotency key (retry/backfill safe):
-      (boundary_id, herd_config_id, as_of, logic_version, config_hash)
-    """
+    """Task 2: deployed logic pattern (retry/backfill safe)."""
     now = utc_now_iso()
     cfg = PipelineConfig()
     ds_params = {
@@ -258,17 +317,14 @@ def compute(
     config_hash = sha256_text(stable_json_dumps(ds_params))
 
     with db_conn(db) as conn:
-        # Ensure idempotency constraint exists (helps even if the DB was copied from the baseline).
         conn.execute(
-            """
-            CREATE UNIQUE INDEX IF NOT EXISTS uq_grazing_reco_idempotent
+            """            CREATE UNIQUE INDEX IF NOT EXISTS uq_grazing_reco_idempotent
             ON grazing_recommendations(boundary_id, herd_config_id, calculation_date, model_version, config_version)
             """
         )
 
         conn.execute(
-            """
-            INSERT INTO model_versions(version_id, description, parameters_json, deployed_at, created_at)
+            """            INSERT INTO model_versions(version_id, description, parameters_json, deployed_at, created_at)
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(version_id) DO NOTHING
             """,
@@ -301,11 +357,9 @@ def compute(
         herd_snapshot = h["config_snapshot_json"] or "{}"
         herd_hash = sha256_text(herd_snapshot)
 
-        # Enforce Task 2 contract: compute uses ingested features for as_of.
         feat = exec_one(
             conn,
-            """
-            SELECT rap_composite_date, rap_source_version, soil_source_version, weather_source_version
+            """            SELECT rap_composite_date, rap_source_version, soil_source_version, weather_source_version
             FROM boundary_daily_features
             WHERE boundary_id=? AND feature_date=?
             LIMIT 1
@@ -319,7 +373,10 @@ def compute(
             )
 
         calc, _prov = compute_grazing_recommendation(
-            conn, boundary_id=boundary_id, herd_config_id=herd_config_id, calculation_date=as_of
+            conn,
+            boundary_id=boundary_id,
+            herd_config_id=herd_config_id,
+            calculation_date=as_of,
         )
 
         input_versions = {
@@ -351,8 +408,7 @@ def compute(
         )
 
         conn.execute(
-            """
-            INSERT INTO grazing_recommendations(
+            """            INSERT INTO grazing_recommendations(
               boundary_id, herd_config_id, calculation_date,
               available_forage_kg, daily_consumption_kg, days_of_grazing_remaining, recommended_move_date,
               model_version, config_version, input_data_versions_json, created_at
@@ -383,9 +439,7 @@ def compute(
 
         rec = exec_one(
             conn,
-            """
-            SELECT id
-            FROM grazing_recommendations
+            """            SELECT id FROM grazing_recommendations
             WHERE boundary_id=? AND herd_config_id=? AND calculation_date=? AND model_version=? AND config_version=?
             """,
             (boundary_id, herd_config_id, as_of, logic_version, config_hash),
@@ -400,6 +454,7 @@ def compute(
             },
             "has_features_row": True,
         }
+
         manifest = RunManifest(
             run_id=str(uuid.uuid4()),
             boundary_id=boundary_id,
@@ -414,6 +469,7 @@ def compute(
             outputs={"grazing_recommendation_id": rec_id, "idempotency_key": idempotency_key},
             created_at=now,
         )
+
         snap_id = manifest.snapshot_id()
         out_path = Path(manifest_out) / boundary_id / f"{as_of}_{snap_id}.json"
         write_manifest(out_path, manifest)
@@ -428,6 +484,57 @@ def compute(
                 indent=2,
             )
         )
+
+
+@app.command()
+def monitor(
+    db: str = typer.Option(...),
+    boundary_id: str = typer.Option(...),
+    end: str = typer.Option(..., help="Inclusive window end date (YYYY-MM-DD)."),
+    window_days: int = typer.Option(30, help="Number of days in rolling window."),
+    out_dir: str = typer.Option("out/monitoring"),
+    fail_on_warn: bool = typer.Option(True, help="If true, WARN causes exit code 1."),
+):
+    """Task 3: label-free output monitoring over time."""
+    cfg = PipelineConfig()
+    d_end = parse_date(end)
+    d_start = (d_end - timedelta(days=max(1, window_days) - 1)).isoformat()
+
+    with db_conn(db) as conn:
+        report = run_output_monitoring(
+            conn,
+            boundary_id=boundary_id,
+            start=d_start,
+            end=end,
+            cfg=cfg,
+        )
+
+    created_at = utc_now_iso()
+    report_with_meta = {
+        "created_at": created_at,
+        "thresholds": {
+            "monitor_zero_days_warn_pct": cfg.monitor_zero_days_warn_pct,
+            "monitor_zero_days_crit_pct": cfg.monitor_zero_days_crit_pct,
+            "monitor_over_max_warn_pct": cfg.monitor_over_max_warn_pct,
+            "monitor_over_max_crit_pct": cfg.monitor_over_max_crit_pct,
+            "monitor_rap_p95_stale_warn_days": cfg.monitor_rap_p95_stale_warn_days,
+            "monitor_rap_p95_stale_crit_days": cfg.monitor_rap_p95_stale_crit_days,
+        },
+        **report,
+    }
+
+    snap = sha256_text(stable_json_dumps(report_with_meta))
+    out_path = Path(out_dir) / boundary_id / f"{end}_{snap[:16]}.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(stable_json_dumps(report_with_meta), encoding="utf-8")
+
+    typer.echo(json.dumps({**report_with_meta, "report_path": str(out_path)}, indent=2))
+
+    status = str(report.get("status") or "ok")
+    if status == "crit":
+        raise typer.Exit(code=2)
+    if status == "warn" and fail_on_warn:
+        raise typer.Exit(code=1)
 
 
 @app.command()
