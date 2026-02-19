@@ -624,34 +624,74 @@ def explain(
         raise typer.BadParameter("recommendation_not_found")
 
     rec = {k: row[k] for k in row.keys()}
+
     try:
         prov = json.loads(rec.get("input_data_versions_json") or "{}")
     except Exception:
         prov = {"parse_error": True}
 
+    # Try to load immutable manifest snapshot (strongest explainability).
     manifest_path = ((prov.get("manifest") or {}) if isinstance(prov, dict) else {}).get("path")
     manifest: dict[str, Any] | None = None
-    if manifest_path:
+    if isinstance(manifest_path, str) and manifest_path:
         p = Path(manifest_path)
         if p.exists():
             manifest = read_manifest(p)
 
-    # Prefer values from the manifest snapshot if available (strongest “why?”)
     inputs = (manifest or {}).get("inputs") if isinstance(manifest, dict) else None
     outputs = (manifest or {}).get("outputs") if isinstance(manifest, dict) else None
-    logic_prov = (inputs or {}).get("logic_provenance") or {} if isinstance(inputs, dict) else {}
 
-    # Build explanation (formula + substitutions)
+    # Outputs (prefer manifest; fall back to DB columns)
     available = (outputs or {}).get("available_forage_kg", rec.get("available_forage_kg"))
     daily = (outputs or {}).get("daily_consumption_kg", rec.get("daily_consumption_kg"))
     days = (outputs or {}).get("days_of_grazing_remaining", rec.get("days_of_grazing_remaining"))
     move = (outputs or {}).get("recommended_move_date", rec.get("recommended_move_date"))
 
+    # Inputs
     herd = (inputs or {}).get("herd") if isinstance(inputs, dict) else None
-    rap = (logic_prov.get("inputs") or {}).get("rap") if isinstance(logic_prov, dict) else None
-    boundary = (
-        (logic_prov.get("inputs") or {}).get("boundary") if isinstance(logic_prov, dict) else None
-    )
+    boundary_inputs = (inputs or {}).get("boundary") if isinstance(inputs, dict) else None
+
+    # In v1 manifest, the “why” for forage comes from:
+    # inputs.logic_provenance.inputs.features_row
+    features_in: dict[str, Any] | None = None
+    if isinstance(inputs, dict):
+        logic_prov = inputs.get("logic_provenance")
+        if isinstance(logic_prov, dict):
+            lp_inputs = logic_prov.get("inputs")
+            if isinstance(lp_inputs, dict):
+                fr = lp_inputs.get("features_row")
+                if isinstance(fr, dict):
+                    features_in = fr
+
+        # Fallback to full row snapshot if the above structure changes
+        if features_in is None:
+            fr2 = inputs.get("features_row")
+            if isinstance(fr2, dict):
+                features_in = fr2
+
+    rap: dict[str, Any] | None = None
+    if isinstance(features_in, dict):
+        rap = {
+            "source_version": features_in.get("rap_source_version"),
+            "composite_date": features_in.get("rap_composite_date"),
+            "biomass_kg_per_ha": features_in.get("rap_biomass_kg_per_ha"),
+        }
+        if all(v is None for v in rap.values()):
+            rap = None
+
+    boundary: dict[str, Any] | None = None
+    if isinstance(boundary_inputs, dict) or isinstance(features_in, dict):
+        boundary = {
+            "boundary_id": rec.get("boundary_id"),
+            "area_ha": (features_in.get("area_ha") if isinstance(features_in, dict) else None),
+            "boundary_geojson_hash": (
+                boundary_inputs.get("boundary_geojson_hash")
+                if isinstance(boundary_inputs, dict)
+                else None
+            ),
+        }
+        if all(v is None for v in boundary.values()):
+            boundary = None
 
     explanation = {
         "question": "Why did the system recommend moving cattle?",
@@ -670,6 +710,7 @@ def explain(
             "recommended_move_date = as_of + floor(days_remaining)",
             "available_forage_kg": {
                 "value": available,
+                "formula": "available_forage_kg = rap_biomass_kg_per_ha * area_ha",
                 "derived_from": {
                     "rap": rap,
                     "boundary": boundary,
@@ -677,6 +718,7 @@ def explain(
             },
             "daily_consumption_kg": {
                 "value": daily,
+                "formula": "daily_consumption_kg = animal_count * daily_intake_kg_per_head",
                 "derived_from": herd,
             },
             "days_remaining": {"value": days},
@@ -687,8 +729,8 @@ def explain(
             "data_snapshot_versions": (
                 prov.get("data_snapshot") if isinstance(prov, dict) else None
             ),
-            "manifest": prov.get("manifest") if isinstance(prov, dict) else None,
-            "code_version": prov.get("code_version") if isinstance(prov, dict) else None,
+            "manifest": (prov.get("manifest") if isinstance(prov, dict) else None),
+            "code_version": (prov.get("code_version") if isinstance(prov, dict) else None),
         },
     }
 
