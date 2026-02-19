@@ -148,3 +148,5 @@ CREATE INDEX IF NOT EXISTS idx_features_boundary_date ON boundary_daily_features
 CREATE INDEX IF NOT EXISTS idx_recommendations_lookup ON grazing_recommendations(boundary_id, calculation_date);
 CREATE INDEX IF NOT EXISTS idx_herd_ranch_pasture ON herd_configurations(ranch_id, pasture_id);
 CREATE INDEX IF NOT EXISTS idx_ingestion_timeframe ON ingestion_runs(timeframe_start, timeframe_end);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_grazing_reco_idempotent
+ON grazing_recommendations(boundary_id, herd_config_id, calculation_date, model_version, config_version);

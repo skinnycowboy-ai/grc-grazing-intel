@@ -20,35 +20,52 @@ def daily_consumption_kg(animal_count: int, daily_intake_kg_per_head: float) -> 
 
 
 def compute_available_forage_kg(conn, *, boundary_id: str, as_of: str) -> tuple[float, dict]:
-    rap = exec_one(
+    """
+    Compute available forage based on *ingested* daily features.
+
+    Source of truth for Task 2: boundary_daily_features for (boundary_id, as_of).
+
+    Units:
+      - rap_biomass_kg_per_ha: kg/ha
+      - area_ha: ha
+      - available_forage_kg: kg  (kg/ha * ha)
+    """
+    feat = exec_one(
         conn,
         """
-        SELECT composite_date, biomass_kg_per_ha, source_version
-        FROM rap_biomass
-        WHERE boundary_id=? AND composite_date <= ?
-        ORDER BY composite_date DESC
+        SELECT
+          rap_composite_date,
+          rap_biomass_kg_per_ha,
+          rap_source_version,
+          soil_source_version,
+          weather_source_version,
+          area_ha
+        FROM boundary_daily_features
+        WHERE boundary_id=? AND feature_date=?
         LIMIT 1
         """,
         (boundary_id, as_of),
     )
-    if not rap:
-        return 0.0, {"rap": None}
+    if not feat:
+        raise ValueError(
+            "Missing boundary_daily_features for boundary/date. "
+            "Run `ingest` for a timeframe that includes this as_of date."
+        )
 
-    b = exec_one(
-        conn, "SELECT area_ha FROM geographic_boundaries WHERE boundary_id=?", (boundary_id,)
-    )
-    area_ha = float(b["area_ha"]) if b and b["area_ha"] is not None else 0.0
-
-    biomass_kg_per_ha = float(rap["biomass_kg_per_ha"] or 0.0)
+    biomass_kg_per_ha = float(feat["rap_biomass_kg_per_ha"] or 0.0)
+    area_ha = float(feat["area_ha"] or 0.0)
     available = biomass_kg_per_ha * area_ha
 
     prov = {
-        "rap": {
-            "composite_date": rap["composite_date"],
-            "biomass_kg_per_ha": biomass_kg_per_ha,
-            "source_version": rap["source_version"],
-        },
-        "boundary": {"area_ha": area_ha},
+        "features_row": {
+            "feature_date": as_of,
+            "rap_composite_date": feat["rap_composite_date"],
+            "rap_biomass_kg_per_ha": biomass_kg_per_ha,
+            "area_ha": area_ha,
+            "rap_source_version": feat["rap_source_version"],
+            "soil_source_version": feat["soil_source_version"],
+            "weather_source_version": feat["weather_source_version"],
+        }
     }
     return float(available), prov
 
