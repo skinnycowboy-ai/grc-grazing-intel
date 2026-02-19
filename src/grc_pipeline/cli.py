@@ -117,8 +117,6 @@ def ingest(
         )
 
         try:
-            # Prefer existing boundary metadata from DB (ranch_id/pasture_id), so we don't overwrite
-            # canonical reference DB fields with NULLs.
             existing = exec_one(
                 conn,
                 "SELECT ranch_id, pasture_id FROM geographic_boundaries WHERE boundary_id=?",
@@ -145,10 +143,6 @@ def ingest(
                 source_file=str(Path(boundary_geojson).name),
             )
 
-            # Herd ingest:
-            # - Filter herds to the pasture for THIS boundary run.
-            # - Only attach boundary_id to those matching herds.
-            # - Use deterministic IDs to avoid duplicates.
             all_herds = load_herd_configs(herds_json, valid_from=start)
             herds: list[dict] = []
             for h in all_herds:
@@ -178,7 +172,6 @@ def ingest(
                 source_version=cfg.openmeteo_source_version,
             )
 
-            # Materialize static+time-series join for the timeframe (Task 1 “joins”)
             feat_res = materialize_boundary_daily_features(
                 conn,
                 boundary_id=boundary.boundary_id,
@@ -189,7 +182,6 @@ def ingest(
             )
             features_n = feat_res.inserted
 
-            # DQ checks (recorded) — use the first filtered herd (if any)
             first = herds[0] if herds else {}
             herd_for_check = {
                 "animal_count": int(first.get("animal_count") or 0),
@@ -228,7 +220,6 @@ def ingest(
                 records_ingested=int(herd_count + weather_n + features_n + 1),
                 error_message=None,
             )
-
         except Exception as e:
             finalize_ingestion_run(
                 conn,
@@ -252,6 +243,12 @@ def compute(
     logic_version: str = typer.Option("days_remaining:v1"),
     manifest_out: str = typer.Option("out/manifests"),
 ):
+    """
+    Task 2: deployed logic pattern.
+
+    Idempotency key (retry/backfill safe):
+      (boundary_id, herd_config_id, as_of, logic_version, config_hash)
+    """
     now = utc_now_iso()
     cfg = PipelineConfig()
     ds_params = {
@@ -261,13 +258,27 @@ def compute(
     config_hash = sha256_text(stable_json_dumps(ds_params))
 
     with db_conn(db) as conn:
+        # Ensure idempotency constraint exists (helps even if the DB was copied from the baseline).
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_grazing_reco_idempotent
+            ON grazing_recommendations(boundary_id, herd_config_id, calculation_date, model_version, config_version)
+            """
+        )
+
         conn.execute(
             """
             INSERT INTO model_versions(version_id, description, parameters_json, deployed_at, created_at)
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(version_id) DO NOTHING
             """,
-            (logic_version, "Rules-based days remaining calculator", "{}", now, now),
+            (
+                logic_version,
+                "Rules-based days remaining calculator",
+                stable_json_dumps(ds_params),
+                now,
+                now,
+            ),
         )
 
         b = exec_one(
@@ -290,40 +301,56 @@ def compute(
         herd_snapshot = h["config_snapshot_json"] or "{}"
         herd_hash = sha256_text(herd_snapshot)
 
-        calc, _prov = compute_grazing_recommendation(
-            conn,
-            boundary_id=boundary_id,
-            herd_config_id=herd_config_id,
-            calculation_date=as_of,
-        )
-
-        rap = exec_one(
+        # Enforce Task 2 contract: compute uses ingested features for as_of.
+        feat = exec_one(
             conn,
             """
-            SELECT composite_date, source_version
-            FROM rap_biomass
-            WHERE boundary_id=? AND composite_date <= ?
-            ORDER BY composite_date DESC
+            SELECT rap_composite_date, rap_source_version, soil_source_version, weather_source_version
+            FROM boundary_daily_features
+            WHERE boundary_id=? AND feature_date=?
             LIMIT 1
             """,
             (boundary_id, as_of),
         )
-        soil = exec_one(
-            conn,
-            "SELECT source_version FROM nrcs_soil_data WHERE boundary_id=? LIMIT 1",
-            (boundary_id,),
+        if not feat:
+            raise typer.BadParameter(
+                "Missing boundary_daily_features for boundary/as_of. "
+                "Run `ingest` for a timeframe that includes this as_of date."
+            )
+
+        calc, _prov = compute_grazing_recommendation(
+            conn, boundary_id=boundary_id, herd_config_id=herd_config_id, calculation_date=as_of
         )
 
         input_versions = {
             "rap": {
-                "source_version": rap["source_version"] if rap else None,
-                "as_of_composite_date": rap["composite_date"] if rap else None,
+                "source_version": feat["rap_source_version"],
+                "as_of_composite_date": feat["rap_composite_date"],
             },
-            "soil": {"source_version": soil["source_version"] if soil else None},
-            "weather": {"source_version": cfg.openmeteo_source_version},
+            "soil": {"source_version": feat["soil_source_version"]},
+            "weather": {"source_version": feat["weather_source_version"]},
         }
 
-        cur = conn.execute(
+        idempotency_key = {
+            "boundary_id": boundary_id,
+            "herd_config_id": herd_config_id,
+            "as_of": as_of,
+            "logic_version": logic_version,
+            "config_hash": config_hash,
+        }
+
+        payload = stable_json_dumps(
+            {
+                "data_snapshot": input_versions,
+                "boundary_geojson_hash": boundary_hash,
+                "herd_snapshot_hash": herd_hash,
+                "logic_version": logic_version,
+                "ds_params": ds_params,
+                "idempotency_key": idempotency_key,
+            }
+        )
+
+        conn.execute(
             """
             INSERT INTO grazing_recommendations(
               boundary_id, herd_config_id, calculation_date,
@@ -331,6 +358,13 @@ def compute(
               model_version, config_version, input_data_versions_json, created_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(boundary_id, herd_config_id, calculation_date, model_version, config_version)
+            DO UPDATE SET
+              available_forage_kg=excluded.available_forage_kg,
+              daily_consumption_kg=excluded.daily_consumption_kg,
+              days_of_grazing_remaining=excluded.days_of_grazing_remaining,
+              recommended_move_date=excluded.recommended_move_date,
+              input_data_versions_json=excluded.input_data_versions_json
             """,
             (
                 boundary_id,
@@ -342,26 +376,29 @@ def compute(
                 calc.recommended_move_date,
                 logic_version,
                 config_hash,
-                stable_json_dumps(
-                    {
-                        "data_snapshot": input_versions,
-                        "boundary_geojson_hash": boundary_hash,
-                        "herd_snapshot_hash": herd_hash,
-                        "logic_version": logic_version,
-                        "ds_params": ds_params,
-                    }
-                ),
+                payload,
                 now,
             ),
         )
-        rec_id = int(cur.lastrowid)
+
+        rec = exec_one(
+            conn,
+            """
+            SELECT id
+            FROM grazing_recommendations
+            WHERE boundary_id=? AND herd_config_id=? AND calculation_date=? AND model_version=? AND config_version=?
+            """,
+            (boundary_id, herd_config_id, as_of, logic_version, config_hash),
+        )
+        rec_id = int(rec["id"]) if rec else 0
 
         dq = {
             "guardrails": {
-                "days_remaining_in_range": (
-                    cfg.min_days_remaining <= calc.days_remaining <= cfg.max_days_remaining
-                )
-            }
+                "days_remaining_in_range": cfg.min_days_remaining
+                <= calc.days_remaining
+                <= cfg.max_days_remaining
+            },
+            "has_features_row": True,
         }
         manifest = RunManifest(
             run_id=str(uuid.uuid4()),
@@ -374,7 +411,7 @@ def compute(
             herd_snapshot_hash=herd_hash,
             input_data_versions=input_versions,
             dq_summary=dq,
-            outputs={"grazing_recommendation_id": rec_id},
+            outputs={"grazing_recommendation_id": rec_id, "idempotency_key": idempotency_key},
             created_at=now,
         )
         snap_id = manifest.snapshot_id()
