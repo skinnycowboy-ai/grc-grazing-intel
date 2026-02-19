@@ -52,6 +52,7 @@ ORDER BY id ASC;
 ```
 
 Hard-fail checks (exit code 2):
+
 - `herd_config_valid`
 - `rap_present`
 - `soil_present`
@@ -59,12 +60,14 @@ Hard-fail checks (exit code 2):
 - `daily_features_complete`
 
 Warnings (ingestion status = `succeeded_with_warnings`):
+
 - `weather_fresh_enough`
 - `rap_fresh_enough`
 
 ### Output monitoring alerts
 
 `monitor` evaluates the trailing window of recommendations and records:
+
 - aggregate metrics
 - per-alert rows with severity
 - a JSON manifest under `out/monitoring/<boundary>/<window_end>_<sha>.json`
@@ -85,6 +88,7 @@ ORDER BY id ASC;
 ```
 
 Common alerts:
+
 - `no_recommendations` (CRIT): nothing computed in the window.
 - `elevated_zero_days_remaining` / `too_many_zero_days_remaining` (WARN/CRIT): outputs collapsing to 0.
 - `some_out_of_range` / `too_many_out_of_range` (WARN/CRIT): guardrail violations.
@@ -100,6 +104,7 @@ This repo does not ship paging/notifications. The operational intent is:
 - `monitor` exits `2` for CRIT.
 
 In Airflow:
+
 - WARN: alert the on-call (Slack/email) and create a ticket.
 - CRIT: page, and block downstream steps that consume the outputs.
 
