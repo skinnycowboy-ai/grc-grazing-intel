@@ -308,7 +308,7 @@ out/
 
 ---
 
-## 11) AI Tools Used
+## AI Tools Used
 
 - **Tool:** OpenAI ChatGPT / Codex and Anthropic Claude Code  
   **Purpose:** Used as an accelerator for design review, documentation drafting, and code/architecture sanity checks (not a substitute for implementation judgment).
