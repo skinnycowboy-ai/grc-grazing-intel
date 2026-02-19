@@ -106,6 +106,7 @@ Checks are recorded per ingestion run in `data_quality_checks` and summarized in
   - RAP not missing for all days
 
 This covers:
+
 - **missing API responses**: weather gaps show up as `daily_features_complete = failed`
 - **stale data**: `weather_fresh_enough` and `rap_fresh_enough`
 - **invalid configs**: `herd_config_valid`
@@ -125,6 +126,7 @@ python -m grc_pipeline.cli monitor   --db out/pipeline.db   --boundary-id bounda
 ```
 
 Exit codes (escalation logic):
+
 - `0` = OK
 - `1` = WARN (page a human in business hours)
 - `2` = CRIT (page immediately / stop the line)
