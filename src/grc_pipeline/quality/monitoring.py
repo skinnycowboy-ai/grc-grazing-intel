@@ -1,4 +1,3 @@
-# src/grc_pipeline/quality/monitoring.py
 from __future__ import annotations
 
 import json
@@ -41,9 +40,11 @@ def run_output_monitoring(
     cfg: PipelineConfig,
 ) -> dict[str, Any]:
     """Compute label-free output monitoring metrics over a window."""
+
     # Basic distribution stats for days_remaining
     row = conn.execute(
-        """        SELECT
+        """
+        SELECT
           COUNT(*) AS n,
           SUM(CASE WHEN days_of_grazing_remaining <= 0 THEN 1 ELSE 0 END) AS n_zero,
           SUM(CASE WHEN days_of_grazing_remaining > ? THEN 1 ELSE 0 END) AS n_over_max,
@@ -61,10 +62,13 @@ def run_output_monitoring(
     n_zero = int(row[1] or 0)
     n_over = int(row[2] or 0)
 
-    # RAP staleness (p95) from recorded provenance
+    # RAP staleness (p95) from recorded provenance.
+    # We parse grazing_recommendations.input_data_versions_json and compute:
+    #   (calculation_date - rap.as_of_composite_date) in days.
     rap_stale_days: list[int] = []
     for calc_date, payload in conn.execute(
-        """        SELECT calculation_date, input_data_versions_json
+        """
+        SELECT calculation_date, input_data_versions_json
         FROM grazing_recommendations
         WHERE boundary_id=?
           AND calculation_date BETWEEN ? AND ?
@@ -73,15 +77,12 @@ def run_output_monitoring(
     ).fetchall():
         try:
             obj = json.loads(payload or "{}")
-            rap_date = (
-                obj.get("data_snapshot", {})
-                .get("rap", {})
-                .get("as_of_composite_date")
-            )
-            if rap_date:
-                d_calc = parse_date(str(calc_date))
-                d_rap = parse_date(str(rap_date))
-                rap_stale_days.append(int((d_calc - d_rap).days))
+            rap_date = obj.get("data_snapshot", {}).get("rap", {}).get("as_of_composite_date")
+            if not rap_date:
+                continue
+            d_calc = parse_date(str(calc_date))
+            d_rap = parse_date(str(rap_date))
+            rap_stale_days.append(int((d_calc - d_rap).days))
         except Exception:
             continue
 
@@ -97,127 +98,130 @@ def run_output_monitoring(
 
     alerts: list[MonitorAlert] = []
 
+    def add_alert(
+        *,
+        name: str,
+        severity: str,
+        passed: bool,
+        details: dict[str, Any],
+    ) -> None:
+        alerts.append(MonitorAlert(name=name, severity=severity, passed=passed, details=details))
+
     if n == 0:
-        alerts.append(
-            MonitorAlert(
-                name="no_recommendations_in_window",
-                severity="crit",
-                passed=False,
-                details={"boundary_id": boundary_id, "start": start, "end": end},
-            )
+        add_alert(
+            name="no_recommendations_in_window",
+            severity="crit",
+            passed=False,
+            details={"boundary_id": boundary_id, "start": start, "end": end},
         )
     else:
         # days_remaining <= 0
         zero_pct = metrics["pct_zero_or_negative_days_remaining"]
         if zero_pct > cfg.monitor_zero_days_crit_pct:
-            alerts.append(
-                MonitorAlert(
-                    "too_many_zero_days_remaining",
-                    "crit",
-                    False,
-                    {"pct": zero_pct, "crit": cfg.monitor_zero_days_crit_pct, "warn": cfg.monitor_zero_days_warn_pct},
-                )
+            add_alert(
+                name="too_many_zero_days_remaining",
+                severity="crit",
+                passed=False,
+                details={
+                    "pct": zero_pct,
+                    "crit": cfg.monitor_zero_days_crit_pct,
+                    "warn": cfg.monitor_zero_days_warn_pct,
+                },
             )
         elif zero_pct > cfg.monitor_zero_days_warn_pct:
-            alerts.append(
-                MonitorAlert(
-                    "too_many_zero_days_remaining",
-                    "warn",
-                    False,
-                    {"pct": zero_pct, "crit": cfg.monitor_zero_days_crit_pct, "warn": cfg.monitor_zero_days_warn_pct},
-                )
+            add_alert(
+                name="too_many_zero_days_remaining",
+                severity="warn",
+                passed=False,
+                details={
+                    "pct": zero_pct,
+                    "crit": cfg.monitor_zero_days_crit_pct,
+                    "warn": cfg.monitor_zero_days_warn_pct,
+                },
             )
         else:
-            alerts.append(
-                MonitorAlert(
-                    "too_many_zero_days_remaining",
-                    "warn",
-                    True,
-                    {"pct": zero_pct, "warn": cfg.monitor_zero_days_warn_pct},
-                )
+            add_alert(
+                name="too_many_zero_days_remaining",
+                severity="warn",
+                passed=True,
+                details={"pct": zero_pct, "warn": cfg.monitor_zero_days_warn_pct},
             )
 
         # days_remaining > max
         over_pct = metrics["pct_over_max_days_remaining"]
         if over_pct > cfg.monitor_over_max_crit_pct:
-            alerts.append(
-                MonitorAlert(
-                    "too_many_over_max_days_remaining",
-                    "crit",
-                    False,
-                    {"pct": over_pct, "crit": cfg.monitor_over_max_crit_pct, "warn": cfg.monitor_over_max_warn_pct},
-                )
+            add_alert(
+                name="too_many_over_max_days_remaining",
+                severity="crit",
+                passed=False,
+                details={
+                    "pct": over_pct,
+                    "crit": cfg.monitor_over_max_crit_pct,
+                    "warn": cfg.monitor_over_max_warn_pct,
+                },
             )
         elif over_pct > cfg.monitor_over_max_warn_pct:
-            alerts.append(
-                MonitorAlert(
-                    "too_many_over_max_days_remaining",
-                    "warn",
-                    False,
-                    {"pct": over_pct, "crit": cfg.monitor_over_max_crit_pct, "warn": cfg.monitor_over_max_warn_pct},
-                )
+            add_alert(
+                name="too_many_over_max_days_remaining",
+                severity="warn",
+                passed=False,
+                details={
+                    "pct": over_pct,
+                    "crit": cfg.monitor_over_max_crit_pct,
+                    "warn": cfg.monitor_over_max_warn_pct,
+                },
             )
         else:
-            alerts.append(
-                MonitorAlert(
-                    "too_many_over_max_days_remaining",
-                    "warn",
-                    True,
-                    {"pct": over_pct, "warn": cfg.monitor_over_max_warn_pct},
-                )
+            add_alert(
+                name="too_many_over_max_days_remaining",
+                severity="warn",
+                passed=True,
+                details={"pct": over_pct, "warn": cfg.monitor_over_max_warn_pct},
             )
 
         # RAP staleness p95
         if rap_p95 is None:
-            alerts.append(
-                MonitorAlert(
-                    "missing_rap_staleness_metrics",
-                    "warn",
-                    False,
-                    {"reason": "no parsable rap composite dates in provenance"},
-                )
+            add_alert(
+                name="missing_rap_staleness_metrics",
+                severity="warn",
+                passed=False,
+                details={"reason": "no parsable rap composite dates in provenance"},
             )
         else:
             if rap_p95 > cfg.monitor_rap_p95_stale_crit_days:
-                alerts.append(
-                    MonitorAlert(
-                        "rap_p95_staleness_too_high",
-                        "crit",
-                        False,
-                        {
-                            "p95_days": rap_p95,
-                            "crit_days": cfg.monitor_rap_p95_stale_crit_days,
-                            "warn_days": cfg.monitor_rap_p95_stale_warn_days,
-                        },
-                    )
+                add_alert(
+                    name="rap_p95_staleness_too_high",
+                    severity="crit",
+                    passed=False,
+                    details={
+                        "p95_days": rap_p95,
+                        "crit_days": cfg.monitor_rap_p95_stale_crit_days,
+                        "warn_days": cfg.monitor_rap_p95_stale_warn_days,
+                    },
                 )
             elif rap_p95 > cfg.monitor_rap_p95_stale_warn_days:
-                alerts.append(
-                    MonitorAlert(
-                        "rap_p95_staleness_too_high",
-                        "warn",
-                        False,
-                        {
-                            "p95_days": rap_p95,
-                            "crit_days": cfg.monitor_rap_p95_stale_crit_days,
-                            "warn_days": cfg.monitor_rap_p95_stale_warn_days,
-                        },
-                    )
+                add_alert(
+                    name="rap_p95_staleness_too_high",
+                    severity="warn",
+                    passed=False,
+                    details={
+                        "p95_days": rap_p95,
+                        "crit_days": cfg.monitor_rap_p95_stale_crit_days,
+                        "warn_days": cfg.monitor_rap_p95_stale_warn_days,
+                    },
                 )
             else:
-                alerts.append(
-                    MonitorAlert(
-                        "rap_p95_staleness_too_high",
-                        "warn",
-                        True,
-                        {"p95_days": rap_p95, "warn_days": cfg.monitor_rap_p95_stale_warn_days},
-                    )
+                add_alert(
+                    name="rap_p95_staleness_too_high",
+                    severity="warn",
+                    passed=True,
+                    details={"p95_days": rap_p95, "warn_days": cfg.monitor_rap_p95_stale_warn_days},
                 )
 
     status = "ok"
-    if any((a.severity == "crit" and not a.passed) for a in alerts):
+    if any(a.severity == "crit" and not a.passed for a in alerts):
         status = "crit"
-    elif any((a.severity == "warn" and not a.passed) for a in alerts):
+    elif any(a.severity == "warn" and not a.passed for a in alerts):
         status = "warn"
 
     return {
@@ -225,6 +229,7 @@ def run_output_monitoring(
         "status": status,
         "metrics": metrics,
         "alerts": [
-            {"name": a.name, "severity": a.severity, "passed": a.passed, "details": a.details} for a in alerts
+            {"name": a.name, "severity": a.severity, "passed": a.passed, "details": a.details}
+            for a in alerts
         ],
     }
