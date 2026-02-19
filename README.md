@@ -1,6 +1,6 @@
-# GRC Grazing Intelligence (Part 1 Take-Home)
+# GRC Grazing Intelligence (Part 1 Take‑Home)
 
-Production-grade, reproducible *grazing intelligence* pipeline using **SQLite + Airflow patterns** (local CLI + minimal DAG skeleton).  
+Production‑grade, reproducible *grazing intelligence* pipeline using **SQLite + Airflow patterns** (local CLI + minimal DAG skeleton).  
 Focus: pipeline design, versioning, lineage, auditability, and operability — **not** ML modeling.
 
 > Repo visibility note: This repo is a **fork** of `pasturemap/ml-test`. GitHub does **not** allow changing a fork from public → private, so it remains public for reviewer access.
@@ -13,25 +13,24 @@ Given a **boundary GeoJSON** + **timeframe** (e.g. 2024 calendar year), the pipe
 
 - **NRCS gSSURGO** soil attributes (static by boundary) — from the provided reference DB (`pasture_reference.db`)
 - **RAP biomass** time series by boundary (sparse composites) — from the provided reference DB
-- **Open-Meteo** daily weather — fetched live and stored (daily rows)
+- **Open‑Meteo** daily weather — fetched live and stored (daily rows)
 - **Herd config** from PastureMap JSON — parsed and stored in `herd_configurations`
 
 It materializes a joined daily feature frame for the timeframe:
 
-- `boundary_daily_features` = **(soil static) + (RAP as-of) + (weather daily)** per boundary per day
+- `boundary_daily_features` = **(soil static) + (RAP as‑of) + (weather daily)** per boundary per day
 
-Then it computes a rules-based recommendation:
+Then it computes a rules‑based recommendation:
 
 ### Days of grazing remaining (rules-based)
 
 ```text
 days_remaining = available_forage_kg / daily_herd_consumption_kg
-recommended_move_date = calculation_date + floor(days_remaining)
 ```
 
 Outputs:
 
-- a row in `grazing_recommendations` (**idempotent by input key**)
+- a row in `grazing_recommendations`
 - a JSON **manifest** under `out/manifests/...` (audit spine: hashes + source versions + parameters)
 
 ---
@@ -58,15 +57,15 @@ Materialized table: `boundary_daily_features(boundary_id, feature_date, …)`
 
 Join semantics for each `feature_date` in `[start, end]`:
 
-- **Weather (Open-Meteo):** exact join on `forecast_date = feature_date`
+- **Weather (Open‑Meteo):** exact join on `forecast_date = feature_date`
   - Missing weather for any day is a **DQ failure**
-- **RAP biomass:** **as-of join** using the latest composite where `composite_date <= feature_date`
+- **RAP biomass:** **as‑of join** using the latest composite where `composite_date <= feature_date`
   - No interpolation; the composite is treated as the “most recent known” value
   - If RAP is missing for **all** days in the timeframe, this is a **DQ failure**
 - **Soil:** static summary by boundary (simple mean of selected attributes across rows)
-  - Note: intentionally simplified for the take-home; production typically uses area-weighted SSURGO component aggregation.
+  - Note: this is intentionally simplified for the take‑home; production would typically use area‑weighted SSURGO component aggregation.
 
-### Idempotency & backfills (ingest)
+### Idempotency & backfills
 
 The ingestion command is safe to rerun:
 
@@ -74,57 +73,63 @@ The ingestion command is safe to rerun:
 - `boundary_daily_features` uses **partition replace** per `(boundary_id, [start,end])`
 - `herd_configurations` uses deterministic IDs (stable across reruns)
 
-Backfills: run `ingest` for any other timeframe; relevant partitions rebuild deterministically.
+Backfills: run `ingest` for any other timeframe; the relevant partitions are rebuilt deterministically.
 
 ---
 
-## Task 2 alignment: deployed logic + idempotent compute
+## Task 2 alignment: deployed “Days Remaining” logic (idempotent compute)
 
-### Deployment pattern
+- Logic lives in `src/grc_pipeline/logic/days_remaining.py`
+- Deployment pattern:
+  - exposed via CLI command `compute`
+  - served via API route `/v1/recommendations/{boundary_id}`
+- Compute idempotency key:
+  - `(boundary_id, herd_config_id, calculation_date, logic_version, config_hash)`
+  - enforced with a **unique index** and `INSERT ... ON CONFLICT DO UPDATE`
 
-The “Days of Grazing Remaining” calculator is deployed as:
+---
 
-- **CLI entrypoint:** `python -m grc_pipeline.cli compute ...`
-- **API serving:** `/v1/recommendations/{boundary_id}?herd_config_id=...&as_of=...`
-- **Versioned artifact:** `logic_version` recorded in `model_versions` and each `grazing_recommendations` row
-- **MRV-grade provenance:** per-run manifest + hashes + source versions persisted alongside outputs
+## Task 3 alignment: validation + monitoring (no labels required)
 
-### Task 2 run contract
+### Ingestion data quality (implemented)
 
-Inputs:
+Checks are recorded per ingestion run in `data_quality_checks` and summarized in `ingestion_runs.status`:
 
-- `boundary_id`
-- `herd_config_id`
-- `as_of` (ISO date, `YYYY-MM-DD`)
-- `logic_version` (default: `days_remaining:v1`)
+- `herd_config_valid` — animal_count > 0 and daily_intake_kg_per_head > 0
+- `rap_present` — RAP rows exist for boundary
+- `rap_fresh_enough` — latest RAP composite is within `cfg.rap_stale_days` of `timeframe_end` (warning if violated)
+- `soil_present` — soil rows exist for boundary
+- `weather_fresh_enough` — weather covers at least `timeframe_end - cfg.weather_stale_days`
+- `daily_features_complete` — materialized join has:
+  - expected number of days
+  - no missing weather days
+  - RAP not missing for all days
 
-Data dependency:
+This covers:
+- **missing API responses**: weather gaps show up as `daily_features_complete = failed`
+- **stale data**: `weather_fresh_enough` and `rap_fresh_enough`
+- **invalid configs**: `herd_config_valid`
 
-- Compute reads from **ingested** `boundary_daily_features` for `(boundary_id, as_of)`.
-- If missing, compute fails fast with: “Run `ingest` for a timeframe that includes this as_of date.”
+### Output monitoring over time (implemented)
 
-Output:
+Without labels, monitor the **shape** and **guardrails** of outputs over a rolling window:
 
-- `grazing_recommendations` row with:
-  - `available_forage_kg` (kg) = `rap_biomass_kg_per_ha * area_ha`
-  - `daily_consumption_kg` (kg/day) = `animal_count * daily_intake_kg_per_head`
-  - `days_of_grazing_remaining`
-  - `recommended_move_date`
+- % of recommendations with `days_remaining <= 0` (indicates likely data/config issues)
+- % of recommendations with `days_remaining > cfg.max_days_remaining` (outliers)
+- p95 RAP staleness (calculation_date − as_of_composite_date)
 
-### Idempotency & backfills (compute)
+Command (writes a JSON report under `out/monitoring/...` and sets exit codes):
 
-Compute is retry/backfill safe via an idempotency key:
-
-```text
-(boundary_id, herd_config_id, calculation_date, model_version, config_version)
+```bash
+python -m grc_pipeline.cli monitor   --db out/pipeline.db   --boundary-id boundary_north_paddock_3   --end 2024-12-31   --window-days 30
 ```
 
-Enforced by a unique index and an UPSERT:
+Exit codes (escalation logic):
+- `0` = OK
+- `1` = WARN (page a human in business hours)
+- `2` = CRIT (page immediately / stop the line)
 
-- reruns update the same row (no duplicates)
-- good fit for Airflow retries, daily schedules, and backfills
-
-Note: manifests are written **per invocation** (new `snapshot_id`/file each run), but they can point to the same stable `recommendation_id` when inputs are unchanged.
+This makes the monitor runnable via Airflow/cron and easy to wire into alerting.
 
 ---
 
@@ -136,9 +141,9 @@ Note: manifests are written **per invocation** (new `snapshot_id`/file each run)
 │   ├── api/                     # FastAPI app
 │   ├── ingest/                  # boundary/herd/weather loaders + feature join
 │   ├── logic/                   # days remaining calculator
-│   ├── quality/                 # DQ checks + helpers
+│   ├── quality/                 # DQ checks + monitoring
 │   ├── store/                   # sqlite helpers + run manifest
-│   ├── cli.py                   # typer commands: ingest / compute / serve
+│   ├── cli.py                   # typer commands: ingest / compute / monitor / serve
 │   └── config.py                # thresholds + versions
 ├── airflow/                     # minimal DAG skeleton (docs-first)
 ├── docs/                        # notes + diagrams
@@ -173,8 +178,6 @@ python -m pip install -e ".[dev]"
 
 ### 0) Create a working DB (don’t mutate the baseline)
 
-The assignment allows using the pre-built reference DB. To keep it clean, copy it:
-
 ```bash
 mkdir -p out
 cp pasture_reference.db out/pipeline.db
@@ -183,38 +186,21 @@ cp pasture_reference.db out/pipeline.db
 ### 1) Ingest (Task 1: pulls + joins)
 
 ```bash
-python -m grc_pipeline.cli ingest \
-  --db out/pipeline.db \
-  --boundary-geojson sample_boundary.geojson \
-  --boundary-id boundary_north_paddock_3 \
-  --boundary-crs EPSG:4326 \
-  --herds-json sample_herds_pasturemap.json \
-  --start 2024-01-01 \
-  --end 2024-12-31
+python -m grc_pipeline.cli ingest   --db out/pipeline.db   --boundary-geojson sample_boundary.geojson   --boundary-id boundary_north_paddock_3   --boundary-crs EPSG:4326   --herds-json sample_herds_pasturemap.json   --start 2024-01-01   --end 2024-12-31
 ```
 
-This will:
-
-- upsert the boundary
-- upsert herd configs for the pasture
-- fetch + store daily Open-Meteo rows
-- materialize `boundary_daily_features` (joined daily frame)
-- record DQ checks and the `ingestion_runs` status
-
-#### Validate the run + DQ
-
-Latest ingestion run:
+Validate run:
 
 ```bash
 sqlite3 out/pipeline.db "
 select run_id,status,started_at,completed_at,records_ingested
 from ingestion_runs
 order by started_at desc
-limit 3;
+limit 1;
 "
 ```
 
-DQ checks for the latest run:
+DQ checks for latest run:
 
 ```bash
 sqlite3 out/pipeline.db "
@@ -224,14 +210,12 @@ where run_id = (
   select run_id from ingestion_runs
   order by started_at desc
   limit 1
-);
+)
+order by check_name;
 "
 ```
 
-#### Validate the Task 1 join artifact
-
-Row count should match number of days in timeframe  
-(2024 is a leap year → **366**):
+Validate join artifact row count (2024 = 366 days):
 
 ```bash
 sqlite3 out/pipeline.db "
@@ -244,19 +228,13 @@ where boundary_id='boundary_north_paddock_3'
 
 ---
 
-### 2) Compute recommendation (Task 2: deployed logic)
-
-Compute once:
+### 2) Compute recommendation (Task 2)
 
 ```bash
-python -m grc_pipeline.cli compute \
-  --db out/pipeline.db \
-  --boundary-id boundary_north_paddock_3 \
-  --herd-config-id 6400725295db666946d63535 \
-  --as-of 2024-12-18
+python -m grc_pipeline.cli compute   --db out/pipeline.db   --boundary-id boundary_north_paddock_3   --herd-config-id 6400725295db666946d63535   --as-of 2024-12-18
 ```
 
-Inspect the result:
+Inspect:
 
 ```bash
 sqlite3 out/pipeline.db "
@@ -276,73 +254,17 @@ limit 1;
 "
 ```
 
-#### Prove idempotency (rerun-safe)
+---
 
-Run `compute` twice with identical inputs:
-
-```bash
-python -m grc_pipeline.cli compute \
-  --db out/pipeline.db \
-  --boundary-id boundary_north_paddock_3 \
-  --herd-config-id 6400725295db666946d63535 \
-  --as-of 2024-12-18
-
-python -m grc_pipeline.cli compute \
-  --db out/pipeline.db \
-  --boundary-id boundary_north_paddock_3 \
-  --herd-config-id 6400725295db666946d63535 \
-  --as-of 2024-12-18
-```
-
-You should still have exactly one output row for that key:
+### 3) Monitor output quality (Task 3)
 
 ```bash
-sqlite3 out/pipeline.db "
-select count(*) from grazing_recommendations
-where boundary_id='boundary_north_paddock_3'
-  and herd_config_id='6400725295db666946d63535'
-  and calculation_date='2024-12-18';
-"
-```
-
-Expected: `1`
-
-#### Inspect provenance captured on the recommendation row
-
-```bash
-sqlite3 out/pipeline.db "
-select input_data_versions_json
-from grazing_recommendations
-where boundary_id='boundary_north_paddock_3'
-order by id desc
-limit 1;
-" | jq
-```
-
-#### Idempotency proof (stable output row key)
-
-```bash
-sqlite3 -header -column out/pipeline.db "
-select id, model_version, config_version
-from grazing_recommendations
-where boundary_id='boundary_north_paddock_3'
-  and herd_config_id='6400725295db666946d63535'
-  and calculation_date='2024-12-18';
-"
-```
-
-Manifest (audit spine):
-
-```bash
-ls -la out/manifests/boundary_north_paddock_3/
-cat out/manifests/boundary_north_paddock_3/2024-12-18_*.json | jq
+python -m grc_pipeline.cli monitor   --db out/pipeline.db   --boundary-id boundary_north_paddock_3   --end 2024-12-31   --window-days 30
 ```
 
 ---
 
-### 3) Serve API
-
-If port 8000 is already in use, use 8001:
+### 4) Serve API
 
 ```bash
 python -m grc_pipeline.cli serve --db out/pipeline.db --host 127.0.0.1 --port 8001
@@ -353,67 +275,8 @@ Smoke test:
 ```bash
 curl -s "http://127.0.0.1:8001/healthz" | jq
 
-curl -s \
-  "http://127.0.0.1:8001/v1/recommendations/boundary_north_paddock_3?herd_config_id=6400725295db666946d63535&as_of=2024-12-18" \
-  | jq
+curl -s   "http://127.0.0.1:8001/v1/recommendations/boundary_north_paddock_3?herd_config_id=6400725295db666946d63535&as_of=2024-12-18"   | jq
 ```
-
----
-
-## Run via Docker (same API)
-
-Build:
-
-```bash
-docker build -t grc-grazing-intel:dev .
-```
-
-Run (maps container port 8000 to host 8002, mounts `./out` to `/data`, and runs as your user):
-
-```bash
-docker run --rm \
-  -u "$(id -u):$(id -g)" \
-  -p 8002:8000 \
-  -v "$PWD/out:/data" \
-  grc-grazing-intel:dev
-```
-
-Smoke test:
-
-```bash
-curl -s "http://127.0.0.1:8002/healthz" | jq
-```
-
----
-
-## Data quality strategy (MRV-friendly)
-
-Defensive checks are recorded per ingestion run in `data_quality_checks`, and summarized via `ingestion_runs.status`:
-
-- `herd_config_valid` — animal_count > 0 and daily_intake_kg_per_head > 0
-- `rap_present` — RAP rows exist for boundary
-- `soil_present` — soil rows exist for boundary
-- `weather_fresh_enough` — weather covers at least `timeframe_end - cfg.weather_stale_days`
-- `daily_features_complete` — materialized join has:
-  - expected number of days
-  - no missing weather days
-  - RAP not missing for all days
-
----
-
-## Provenance & auditability
-
-Each recommendation can be explained by:
-
-1. `grazing_recommendations.input_data_versions_json`
-   - RAP/soil/weather source versions
-   - hashes of boundary geojson + herd snapshot
-   - logic version + DS params
-   - idempotency key
-2. Manifest JSON file under `out/manifests/...`
-   - stable snapshot identity (`snapshot_id`)
-   - output row IDs (including idempotency key)
-   - guardrail flags
 
 ---
 
@@ -421,19 +284,15 @@ Each recommendation can be explained by:
 
 A minimal DAG stub lives in `airflow/dags/grazing_intel_dag.py` and demonstrates how to schedule:
 
-- `ingest(boundary, timeframe)` as a parameterized task
-- `compute(boundary, herd_config_id, as_of)` downstream
+- `ingest(boundary, [ds-30, ds])` as a parameterized task
+- `compute(boundary, herd_config_id, ds)` downstream
+- `monitor(boundary, ds-30..ds)` downstream (alerts on WARN/CRIT via exit codes)
 
 This repo does not ship a full Airflow runtime; the DAG is intentionally docs-first to show schedulability and idempotent task boundaries.
 
 ---
 
 ## Git hygiene
-
-Goal:
-
-- keep `pasture_reference.db` in repo (baseline reference)
-- ignore generated DBs and outputs under `out/`
 
 Example `.gitignore` snippet:
 
@@ -444,14 +303,3 @@ out/
 ```
 
 **Important:** do not commit `out/pipeline.db` (derived artifact).
-
----
-
-## Screenshots (optional)
-
-If you include screenshots for reviewers, the highest signal ones are:
-
-1) `boundary_daily_features` row count = 366 for 2024  
-2) `data_quality_checks` showing `daily_features_complete` passed  
-3) idempotent compute proof: `count(*) = 1` after two `compute` runs  
-4) manifest JSON showing hashes + source versions + idempotency key
