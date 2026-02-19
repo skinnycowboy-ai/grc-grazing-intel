@@ -24,7 +24,6 @@ from .quality.checks import (
     check_weather_freshness,
     check_weather_response_complete,
 )
-
 from .quality.monitoring import run_output_monitoring
 from .store.db import (
     db_conn,
