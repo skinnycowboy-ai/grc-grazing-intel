@@ -3,7 +3,7 @@
 **Goal:** Automate testing and deployment of **logic updates** (e.g., `days_remaining` rules, thresholds/config)
 to a production-like environment with strong **traceability**, **rollbacks**, and **guardrails**.
 
-> No working code. This document is an implementation-grade CI/CD design spec you can drop into the repo.
+> No working code. This document is an implementation-grade CI/CD design spec.
 
 ---
 

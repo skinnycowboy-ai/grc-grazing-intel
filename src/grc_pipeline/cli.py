@@ -6,6 +6,7 @@ import json
 import uuid
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -25,6 +26,7 @@ from .quality.checks import (
     check_weather_response_complete,
 )
 from .quality.monitoring import run_output_monitoring
+from .runtime import collect_code_metadata
 from .store.db import (
     db_conn,
     exec_one,
@@ -33,10 +35,26 @@ from .store.db import (
     insert_ingestion_run,
     upsert_geographic_boundary,
 )
-from .store.manifest import RunManifest, sha256_text, stable_json_dumps, write_manifest
+from .store.manifest import (
+    RunManifest,
+    read_manifest,
+    sha256_text,
+    stable_json_dumps,
+    write_manifest_if_missing,
+)
 from .timeutil import parse_date, utc_now_iso
 
 app = typer.Typer(add_completion=False)
+
+
+def _unwrap_option(v: Any) -> Any:
+    """
+    When calling @app.command() functions directly (e.g., unit tests),
+    typer.Option defaults may still be OptionInfo objects.
+    """
+    if isinstance(v, typer.models.OptionInfo):
+        return v.default
+    return v
 
 
 def _infer_pasture_id_from_boundary_id(boundary_id: str) -> str | None:
@@ -83,12 +101,11 @@ def _load_boundary_with_optional_crs(
 ):
     """Call load_boundary_geojson with whichever CRS kwarg exists (back-compat)."""
     sig = inspect.signature(load_boundary_geojson)
-    kwargs = {"boundary_id": boundary_id, "name": boundary_name}
+    kwargs: dict[str, Any] = {"boundary_id": boundary_id, "name": boundary_name}
     if "input_crs" in sig.parameters:
         kwargs["input_crs"] = boundary_crs
     elif "boundary_crs" in sig.parameters:
         kwargs["boundary_crs"] = boundary_crs
-    # else: older version has no CRS transform support
     return load_boundary_geojson(boundary_geojson, **kwargs)
 
 
@@ -102,7 +119,7 @@ def _materialize_features_with_compat_kwargs(
     created_at: str,
 ):
     sig = inspect.signature(materialize_boundary_daily_features)
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "conn": conn,
         "boundary_id": boundary_id,
         "start": start,
@@ -144,7 +161,6 @@ def ingest(
         boundary_name=boundary_name,
         boundary_crs=boundary_crs,
     )
-
     sources = [
         "reference_db:nrcs_soil_data",
         "reference_db:rap_biomass",
@@ -164,7 +180,6 @@ def ingest(
             status="running",
             started_at=started_at,
         )
-
         try:
             existing = exec_one(
                 conn,
@@ -175,7 +190,6 @@ def ingest(
             boundary_pasture_id = (
                 existing["pasture_id"] if existing and existing["pasture_id"] else None
             )
-
             if not boundary_pasture_id:
                 boundary_pasture_id = _infer_pasture_id_from_boundary_id(boundary.boundary_id)
 
@@ -222,7 +236,6 @@ def ingest(
                 source_version=cfg.openmeteo_source_version,
             )
 
-            # Materialize static+time-series join for timeframe
             feat_res = _materialize_features_with_compat_kwargs(
                 conn,
                 boundary_id=boundary.boundary_id,
@@ -233,7 +246,6 @@ def ingest(
             )
             features_n = int(getattr(feat_res, "inserted", 0))
 
-            # DQ checks — use the first filtered herd (if any)
             first = herds[0] if herds else {}
             herd_for_check = {
                 "animal_count": int(first.get("animal_count") or 0),
@@ -306,14 +318,41 @@ def compute(
     logic_version: str = typer.Option("days_remaining:v1"),
     manifest_out: str = typer.Option("out/manifests"),
 ):
-    """Task 2: deployed logic pattern (retry/backfill safe)."""
+    """
+    Task 6: immutable, reproducible recommendation compute.
+
+    Versioning:
+      - logic_version: explicit model/logic version (e.g. days_remaining:v1)
+      - config_hash: hash of config parameters that affect computation
+      - data snapshot: captured in a manifest with stable snapshot_id
+
+    Idempotency/backfill:
+      - Primary key is (boundary_id, herd_config_id, calculation_date, model_version, config_version)
+      - On conflict: DO NOTHING (never overwrite history)
+      - If an existing record has different provenance: error and require a version bump
+    """
+    # Unwrap Typer defaults when called directly in tests.
+    logic_version = str(_unwrap_option(logic_version))
+    manifest_out = str(_unwrap_option(manifest_out))
+
     now = utc_now_iso()
     cfg = PipelineConfig()
+    code_meta = collect_code_metadata()
+
     ds_params = {
         "max_days_remaining": cfg.max_days_remaining,
         "min_days_remaining": cfg.min_days_remaining,
     }
     config_hash = sha256_text(stable_json_dumps(ds_params))
+
+    idempotency_key = {
+        "boundary_id": boundary_id,
+        "herd_config_id": herd_config_id,
+        "as_of": as_of,
+        "logic_version": logic_version,
+        "config_hash": config_hash,
+    }
+    run_id = sha256_text(stable_json_dumps(idempotency_key))[:32]  # stable across retries
 
     with db_conn(db) as conn:
         conn.execute(
@@ -350,7 +389,8 @@ def compute(
 
         h = exec_one(
             conn,
-            "SELECT config_snapshot_json FROM herd_configurations WHERE id=?",
+            "SELECT config_snapshot_json, animal_count, daily_intake_kg_per_head "
+            "FROM herd_configurations WHERE id=?",
             (herd_config_id,),
         )
         if not h:
@@ -361,7 +401,7 @@ def compute(
         feat = exec_one(
             conn,
             """
-            SELECT rap_composite_date, rap_source_version, soil_source_version, weather_source_version
+            SELECT *
             FROM boundary_daily_features
             WHERE boundary_id=? AND feature_date=?
             LIMIT 1
@@ -374,13 +414,14 @@ def compute(
                 "Run `ingest` for a timeframe that includes this as_of date."
             )
 
-        calc, _prov = compute_grazing_recommendation(
+        calc, prov = compute_grazing_recommendation(
             conn,
             boundary_id=boundary_id,
             herd_config_id=herd_config_id,
             calculation_date=as_of,
         )
 
+        # Thin, indexed provenance (store in DB)
         input_versions = {
             "rap": {
                 "source_version": feat["rap_source_version"],
@@ -390,25 +431,75 @@ def compute(
             "weather": {"source_version": feat["weather_source_version"]},
         }
 
-        idempotency_key = {
-            "boundary_id": boundary_id,
-            "herd_config_id": herd_config_id,
-            "as_of": as_of,
-            "logic_version": logic_version,
-            "config_hash": config_hash,
+        # Full input snapshot (store in manifest file)
+        feat_dict = {k: feat[k] for k in feat.keys()}
+        inputs_snapshot = {
+            "boundary": {"boundary_id": boundary_id, "boundary_geojson_hash": boundary_hash},
+            "herd": {
+                "herd_config_id": herd_config_id,
+                "herd_snapshot_hash": herd_hash,
+                "animal_count": int(h["animal_count"] or 0),
+                "daily_intake_kg_per_head": float(h["daily_intake_kg_per_head"] or 0.0),
+            },
+            "features_row": feat_dict,
+            "logic_provenance": prov,  # includes RAP composite + biomass + area_ha used
+            "data_snapshot_versions": input_versions,
+            "config": {"ds_params": ds_params, "config_hash": config_hash},
         }
 
+        dq = {
+            "guardrails": {
+                "days_remaining_in_range": cfg.min_days_remaining
+                <= calc.days_remaining
+                <= cfg.max_days_remaining
+            },
+            "has_features_row": True,
+            "has_rap": bool((prov or {}).get("inputs", {}).get("rap")),
+        }
+
+        outputs = {
+            "available_forage_kg": calc.available_forage_kg,
+            "daily_consumption_kg": calc.daily_consumption_kg,
+            "days_of_grazing_remaining": calc.days_remaining,
+            "recommended_move_date": calc.recommended_move_date,
+        }
+
+        # Build manifest + stable snapshot id/path
+        manifest = RunManifest(
+            schema_version=1,
+            run_type="compute_recommendation",
+            run_id=run_id,
+            created_at=now,
+            code=code_meta,
+            idempotency_key=idempotency_key,
+            inputs=inputs_snapshot,
+            dq_summary=dq,
+            outputs=outputs,
+        )
+        snap_id = manifest.snapshot_id()
+        out_path = Path(manifest_out) / boundary_id / f"{as_of}_{snap_id}.json"
+
+        # Store a minimal pointer + hashes in DB (no big blobs)
         payload = stable_json_dumps(
             {
+                "schema_version": 1,
+                "manifest": {"snapshot_id": snap_id, "path": str(out_path)},
                 "data_snapshot": input_versions,
                 "boundary_geojson_hash": boundary_hash,
                 "herd_snapshot_hash": herd_hash,
                 "logic_version": logic_version,
                 "ds_params": ds_params,
+                "config_hash": config_hash,
                 "idempotency_key": idempotency_key,
+                "code_version": {
+                    "git_commit": code_meta.get("git_commit", "unknown"),
+                    "package_version": code_meta.get("package_version", "unknown"),
+                },
+                "inputs_snapshot_hash": sha256_text(stable_json_dumps(inputs_snapshot)),
             }
         )
 
+        # Append-only insert (never overwrite history)
         conn.execute(
             """
             INSERT INTO grazing_recommendations(
@@ -418,12 +509,7 @@ def compute(
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(boundary_id, herd_config_id, calculation_date, model_version, config_version)
-            DO UPDATE SET
-              available_forage_kg=excluded.available_forage_kg,
-              daily_consumption_kg=excluded.daily_consumption_kg,
-              days_of_grazing_remaining=excluded.days_of_grazing_remaining,
-              recommended_move_date=excluded.recommended_move_date,
-              input_data_versions_json=excluded.input_data_versions_json
+            DO NOTHING
             """,
             (
                 boundary_id,
@@ -443,51 +529,170 @@ def compute(
         rec = exec_one(
             conn,
             """
-            SELECT id FROM grazing_recommendations
+            SELECT id, input_data_versions_json
+            FROM grazing_recommendations
             WHERE boundary_id=? AND herd_config_id=? AND calculation_date=? AND model_version=? AND config_version=?
             """,
             (boundary_id, herd_config_id, as_of, logic_version, config_hash),
         )
-        rec_id = int(rec["id"]) if rec else 0
-
-        dq = {
-            "guardrails": {
-                "days_remaining_in_range": cfg.min_days_remaining
-                <= calc.days_remaining
-                <= cfg.max_days_remaining
-            },
-            "has_features_row": True,
-        }
-
-        manifest = RunManifest(
-            run_id=str(uuid.uuid4()),
-            boundary_id=boundary_id,
-            timeframe_start=as_of,
-            timeframe_end=as_of,
-            logic_version=logic_version,
-            config_hash=config_hash,
-            boundary_geojson_hash=boundary_hash,
-            herd_snapshot_hash=herd_hash,
-            input_data_versions=input_versions,
-            dq_summary=dq,
-            outputs={"grazing_recommendation_id": rec_id, "idempotency_key": idempotency_key},
-            created_at=now,
-        )
-
-        snap_id = manifest.snapshot_id()
-        out_path = Path(manifest_out) / boundary_id / f"{as_of}_{snap_id}.json"
-        write_manifest(out_path, manifest)
-
-        typer.echo(
-            json.dumps(
-                {
-                    "recommendation_id": rec_id,
-                    "snapshot_id": snap_id,
-                    "manifest_path": str(out_path),
-                },
-                indent=2,
+        if not rec:
+            raise RuntimeError(
+                "Failed to read back grazing_recommendations row after insert/do-nothing."
             )
+
+        existing_payload = rec["input_data_versions_json"] or ""
+        if existing_payload and existing_payload != payload:
+            # This prevents silent drift if underlying inputs changed but the version key didn’t.
+            raise RuntimeError(
+                "Existing recommendation already present with DIFFERENT provenance under the same "
+                "(boundary, herd, date, logic_version, config_hash). "
+                "Refusing to overwrite history. Bump logic_version (e.g. days_remaining:v2) "
+                "or change config params to create a new config_hash."
+            )
+
+        rec_id = int(rec["id"])
+
+        # Write manifest (immutable + idempotent)
+        write_manifest_if_missing(out_path, manifest)
+
+    typer.echo(
+        json.dumps(
+            {
+                "recommendation_id": rec_id,
+                "snapshot_id": snap_id,
+                "manifest_path": str(out_path),
+                "logic_version": logic_version,
+                "config_hash": config_hash,
+            },
+            indent=2,
         )
+    )
+
+
+@app.command()
+def explain(
+    db: str = typer.Option(...),
+    recommendation_id: int | None = typer.Option(
+        None, help="Primary key id in grazing_recommendations."
+    ),
+    boundary_id: str | None = typer.Option(None),
+    herd_config_id: str | None = typer.Option(None),
+    as_of: str | None = typer.Option(None, help="YYYY-MM-DD"),
+):
+    """
+    Task 6: Answer “Why did we recommend moving?” months later.
+
+    Preferred usage:
+      explain --recommendation-id <id>
+    Fallback:
+      explain --boundary-id ... --herd-config-id ... --as-of ...
+    """
+    # Unwrap Typer defaults when called directly in tests.
+    db = str(_unwrap_option(db))
+
+    if recommendation_id is None:
+        if not (boundary_id and herd_config_id and as_of):
+            raise typer.BadParameter(
+                "Provide --recommendation-id OR (--boundary-id, --herd-config-id, --as-of)."
+            )
+
+    with db_conn(db) as conn:
+        if recommendation_id is not None:
+            row = exec_one(
+                conn,
+                """
+                SELECT *
+                FROM grazing_recommendations
+                WHERE id=?
+                """,
+                (recommendation_id,),
+            )
+        else:
+            row = exec_one(
+                conn,
+                """
+                SELECT *
+                FROM grazing_recommendations
+                WHERE boundary_id=? AND herd_config_id=? AND calculation_date=?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (boundary_id, herd_config_id, as_of),
+            )
+
+    if not row:
+        raise typer.BadParameter("recommendation_not_found")
+
+    rec = {k: row[k] for k in row.keys()}
+    try:
+        prov = json.loads(rec.get("input_data_versions_json") or "{}")
+    except Exception:
+        prov = {"parse_error": True}
+
+    manifest_path = ((prov.get("manifest") or {}) if isinstance(prov, dict) else {}).get("path")
+    manifest: dict[str, Any] | None = None
+    if manifest_path:
+        p = Path(manifest_path)
+        if p.exists():
+            manifest = read_manifest(p)
+
+    # Prefer values from the manifest snapshot if available (strongest “why?”)
+    inputs = (manifest or {}).get("inputs") if isinstance(manifest, dict) else None
+    outputs = (manifest or {}).get("outputs") if isinstance(manifest, dict) else None
+    logic_prov = (inputs or {}).get("logic_provenance") or {} if isinstance(inputs, dict) else {}
+
+    # Build explanation (formula + substitutions)
+    available = (outputs or {}).get("available_forage_kg", rec.get("available_forage_kg"))
+    daily = (outputs or {}).get("daily_consumption_kg", rec.get("daily_consumption_kg"))
+    days = (outputs or {}).get("days_of_grazing_remaining", rec.get("days_of_grazing_remaining"))
+    move = (outputs or {}).get("recommended_move_date", rec.get("recommended_move_date"))
+
+    herd = (inputs or {}).get("herd") if isinstance(inputs, dict) else None
+    rap = (logic_prov.get("inputs") or {}).get("rap") if isinstance(logic_prov, dict) else None
+    boundary = (
+        (logic_prov.get("inputs") or {}).get("boundary") if isinstance(logic_prov, dict) else None
+    )
+
+    explanation = {
+        "question": "Why did the system recommend moving cattle?",
+        "recommendation": {
+            "id": rec.get("id"),
+            "boundary_id": rec.get("boundary_id"),
+            "herd_config_id": rec.get("herd_config_id"),
+            "calculation_date": rec.get("calculation_date"),
+            "recommended_move_date": move,
+            "days_of_grazing_remaining": days,
+            "model_version": rec.get("model_version"),
+            "config_version": rec.get("config_version"),
+        },
+        "because": {
+            "formula": "days_remaining = available_forage_kg / daily_consumption_kg; "
+            "recommended_move_date = as_of + floor(days_remaining)",
+            "available_forage_kg": {
+                "value": available,
+                "derived_from": {
+                    "rap": rap,
+                    "boundary": boundary,
+                },
+            },
+            "daily_consumption_kg": {
+                "value": daily,
+                "derived_from": herd,
+            },
+            "days_remaining": {"value": days},
+        },
+        "provenance": {
+            "logic_version": (prov.get("logic_version") if isinstance(prov, dict) else None),
+            "config_hash": (prov.get("config_hash") if isinstance(prov, dict) else None),
+            "data_snapshot_versions": (
+                prov.get("data_snapshot") if isinstance(prov, dict) else None
+            ),
+            "manifest": prov.get("manifest") if isinstance(prov, dict) else None,
+            "code_version": prov.get("code_version") if isinstance(prov, dict) else None,
+        },
+    }
+
+    typer.echo(json.dumps(explanation, indent=2))
 
 
 @app.command()
@@ -506,11 +711,7 @@ def monitor(
 
     with db_conn(db) as conn:
         report = run_output_monitoring(
-            conn,
-            boundary_id=boundary_id,
-            start=d_start,
-            end=end,
-            cfg=cfg,
+            conn, boundary_id=boundary_id, start=d_start, end=end, cfg=cfg
         )
 
     created_at = utc_now_iso()
@@ -526,7 +727,6 @@ def monitor(
         },
         **report,
     }
-
     snap = sha256_text(stable_json_dumps(report_with_meta))
     out_path = Path(out_dir) / boundary_id / f"{end}_{snap[:16]}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
