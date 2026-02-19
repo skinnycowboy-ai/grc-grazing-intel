@@ -319,6 +319,18 @@ limit 1;
 " | jq
 ```
 
+#### Idempotency proof (stable output row key)
+
+```bash
+sqlite3 -header -column out/pipeline.db "
+select id, model_version, config_version
+from grazing_recommendations
+where boundary_id='boundary_north_paddock_3'
+  and herd_config_id='6400725295db666946d63535'
+  and calculation_date='2024-12-18';
+"
+```
+
 Manifest (audit spine):
 
 ```bash
