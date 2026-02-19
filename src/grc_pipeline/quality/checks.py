@@ -1,3 +1,4 @@
+# src/grc_pipeline/quality/checks.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -45,7 +46,6 @@ def check_weather_freshness(
 ) -> CheckResult:
     end = parse_date(timeframe_end)
     min_expected = (end - cfg.weather_stale_delta).isoformat()
-
     row = exec_one(
         conn,
         "SELECT MAX(forecast_date) AS max_date, COUNT(*) AS n FROM weather_forecasts WHERE boundary_id=?",
@@ -59,6 +59,57 @@ def check_weather_freshness(
         "freshness",
         passed,
         {"max_forecast_date": max_date, "min_expected": min_expected, "count": n},
+    )
+
+
+def check_daily_features_complete(conn, *, boundary_id: str, start: str, end: str) -> CheckResult:
+    s = parse_date(start)
+    e = parse_date(end)
+    expected = (e - s).days + 1
+
+    row = exec_one(
+        conn,
+        """
+        SELECT
+          COUNT(*) AS n,
+          SUM(CASE WHEN rap_biomass_kg_per_ha IS NULL THEN 1 ELSE 0 END) AS rap_missing,
+          SUM(
+            CASE
+              WHEN weather_precipitation_mm IS NULL
+               AND weather_temp_max_c IS NULL
+               AND weather_temp_min_c IS NULL
+               AND weather_wind_speed_kmh IS NULL
+              THEN 1 ELSE 0
+            END
+          ) AS weather_missing
+        FROM boundary_daily_features
+        WHERE boundary_id=? AND feature_date BETWEEN ? AND ?
+        """,
+        (boundary_id, start, end),
+    )
+
+    n = int(row["n"]) if row and row["n"] is not None else 0
+    rap_missing = int(row["rap_missing"]) if row and row["rap_missing"] is not None else 0
+    weather_missing = (
+        int(row["weather_missing"]) if row and row["weather_missing"] is not None else 0
+    )
+
+    # Pass criteria:
+    # - we produced a complete daily frame (n == expected)
+    # - weather is present for all days (weather_missing == 0)
+    # - RAP isn't totally absent for the entire frame (rap_missing < expected)
+    passed = (n == expected) and (weather_missing == 0) and (rap_missing < expected)
+
+    return CheckResult(
+        "daily_features_complete",
+        "join_completeness",
+        passed,
+        {
+            "expected_days": expected,
+            "rows_materialized": n,
+            "rap_missing_days": rap_missing,
+            "weather_missing_days": weather_missing,
+        },
     )
 
 

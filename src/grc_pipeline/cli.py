@@ -1,3 +1,4 @@
+# src/grc_pipeline/cli.py
 from __future__ import annotations
 
 import json
@@ -8,10 +9,12 @@ import typer
 
 from .config import PipelineConfig
 from .ingest.boundary import load_boundary_geojson
+from .ingest.features import materialize_boundary_daily_features
 from .ingest.herd import load_herd_configs, upsert_herd_configs
 from .ingest.openmeteo import fetch_openmeteo_daily, upsert_weather_forecasts
 from .logic.days_remaining import compute_grazing_recommendation
 from .quality.checks import (
+    check_daily_features_complete,
     check_has_rap_for_boundary,
     check_has_soil_for_boundary,
     check_herd_config_valid,
@@ -32,10 +35,7 @@ app = typer.Typer(add_completion=False)
 
 
 def _infer_pasture_id_from_boundary_id(boundary_id: str) -> str | None:
-    """
-    Heuristic fallback only. Prefer DB mapping if present.
-    Example: boundary_north_paddock_3 -> paddock_3
-    """
+    """Heuristic fallback only. Prefer DB mapping if present."""
     if not boundary_id:
         return None
     parts = boundary_id.split("_")
@@ -45,9 +45,7 @@ def _infer_pasture_id_from_boundary_id(boundary_id: str) -> str | None:
 
 
 def _stable_herd_id(boundary_id: str, herd_row: dict) -> str:
-    """
-    Deterministic herd config ID so ingest is idempotent across reruns.
-    """
+    """Deterministic herd config ID so ingest is idempotent across reruns."""
     src_id = herd_row.get("id")
     if src_id and isinstance(src_id, str) and src_id.strip():
         return src_id.strip()
@@ -82,17 +80,28 @@ def ingest(
         None, help="Override boundary_id to align with reference DB (recommended)."
     ),
     boundary_name: str = typer.Option(None),
+    boundary_crs: str = typer.Option(
+        "EPSG:4326",
+        help="CRS of the input GeoJSON coordinates (used to transform to EPSG:4326).",
+    ),
 ):
     cfg = PipelineConfig()
     run_id = str(uuid.uuid4())
     started_at = utc_now_iso()
 
-    boundary = load_boundary_geojson(boundary_geojson, boundary_id=boundary_id, name=boundary_name)
+    boundary = load_boundary_geojson(
+        boundary_geojson,
+        boundary_id=boundary_id,
+        name=boundary_name,
+        input_crs=boundary_crs,
+    )
+
     sources = [
         "reference_db:nrcs_soil_data",
         "reference_db:rap_biomass",
         cfg.openmeteo_source_version,
         "pasturemap:herd_config",
+        "derived:boundary_daily_features",
     ]
 
     with db_conn(db) as conn:
@@ -108,25 +117,17 @@ def ingest(
         )
 
         try:
-            # Prefer existing boundary metadata from DB (ranch_id/pasture_id),
-            # so we don't overwrite canonical reference DB fields with NULLs.
+            # Prefer existing boundary metadata from DB (ranch_id/pasture_id), so we don't overwrite
+            # canonical reference DB fields with NULLs.
             existing = exec_one(
                 conn,
                 "SELECT ranch_id, pasture_id FROM geographic_boundaries WHERE boundary_id=?",
                 (boundary.boundary_id,),
             )
-
-            boundary_ranch_id = None
-            boundary_pasture_id = None
-            if existing:
-                try:
-                    boundary_ranch_id = existing["ranch_id"] if existing["ranch_id"] else None
-                except Exception:
-                    boundary_ranch_id = None
-                try:
-                    boundary_pasture_id = existing["pasture_id"] if existing["pasture_id"] else None
-                except Exception:
-                    boundary_pasture_id = None
+            boundary_ranch_id = existing["ranch_id"] if existing and existing["ranch_id"] else None
+            boundary_pasture_id = (
+                existing["pasture_id"] if existing and existing["pasture_id"] else None
+            )
 
             if not boundary_pasture_id:
                 boundary_pasture_id = _infer_pasture_id_from_boundary_id(boundary.boundary_id)
@@ -149,7 +150,6 @@ def ingest(
             # - Only attach boundary_id to those matching herds.
             # - Use deterministic IDs to avoid duplicates.
             all_herds = load_herd_configs(herds_json, valid_from=start)
-
             herds: list[dict] = []
             for h in all_herds:
                 if (
@@ -178,12 +178,24 @@ def ingest(
                 source_version=cfg.openmeteo_source_version,
             )
 
+            # Materialize static+time-series join for the timeframe (Task 1 “joins”)
+            feat_res = materialize_boundary_daily_features(
+                conn,
+                boundary_id=boundary.boundary_id,
+                start=start,
+                end=end,
+                weather_source_version=cfg.openmeteo_source_version,
+                created_at=utc_now_iso(),
+            )
+            features_n = feat_res.inserted
+
             # DQ checks (recorded) — use the first filtered herd (if any)
             first = herds[0] if herds else {}
             herd_for_check = {
                 "animal_count": int(first.get("animal_count") or 0),
                 "daily_intake_kg_per_head": float(first.get("daily_intake_kg_per_head") or 0.0),
             }
+
             checks = [
                 check_herd_config_valid(herd_for_check),
                 check_has_rap_for_boundary(conn, boundary_id=boundary.boundary_id),
@@ -191,7 +203,11 @@ def ingest(
                 check_weather_freshness(
                     conn, boundary_id=boundary.boundary_id, timeframe_end=end, cfg=cfg
                 ),
+                check_daily_features_complete(
+                    conn, boundary_id=boundary.boundary_id, start=start, end=end
+                ),
             ]
+
             for c in checks:
                 insert_dq_check(
                     conn,
@@ -209,9 +225,10 @@ def ingest(
                 run_id=run_id,
                 status=status,
                 completed_at=utc_now_iso(),
-                records_ingested=int(herd_count + weather_n + 1),
+                records_ingested=int(herd_count + weather_n + features_n + 1),
                 error_message=None,
             )
+
         except Exception as e:
             finalize_ingestion_run(
                 conn,
@@ -286,7 +303,8 @@ def compute(
             SELECT composite_date, source_version
             FROM rap_biomass
             WHERE boundary_id=? AND composite_date <= ?
-            ORDER BY composite_date DESC LIMIT 1
+            ORDER BY composite_date DESC
+            LIMIT 1
             """,
             (boundary_id, as_of),
         )
@@ -309,9 +327,8 @@ def compute(
             """
             INSERT INTO grazing_recommendations(
               boundary_id, herd_config_id, calculation_date,
-              available_forage_kg, daily_consumption_kg, days_of_grazing_remaining,
-              recommended_move_date, model_version, config_version,
-              input_data_versions_json, created_at
+              available_forage_kg, daily_consumption_kg, days_of_grazing_remaining, recommended_move_date,
+              model_version, config_version, input_data_versions_json, created_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
@@ -346,7 +363,6 @@ def compute(
                 )
             }
         }
-
         manifest = RunManifest(
             run_id=str(uuid.uuid4()),
             boundary_id=boundary_id,
@@ -365,12 +381,16 @@ def compute(
         out_path = Path(manifest_out) / boundary_id / f"{as_of}_{snap_id}.json"
         write_manifest(out_path, manifest)
 
-    typer.echo(
-        json.dumps(
-            {"recommendation_id": rec_id, "snapshot_id": snap_id, "manifest_path": str(out_path)},
-            indent=2,
+        typer.echo(
+            json.dumps(
+                {
+                    "recommendation_id": rec_id,
+                    "snapshot_id": snap_id,
+                    "manifest_path": str(out_path),
+                },
+                indent=2,
+            )
         )
-    )
 
 
 @app.command()
