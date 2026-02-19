@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from ..store.db import exec_one
 from ..timeutil import utc_now_iso
 
-
 FEATURES_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS boundary_daily_features (
   boundary_id TEXT NOT NULL,
@@ -70,7 +69,9 @@ def materialize_boundary_daily_features(
 
     conn.executescript(FEATURES_SCHEMA_SQL)
 
-    b = exec_one(conn, "SELECT area_ha FROM geographic_boundaries WHERE boundary_id=?", (boundary_id,))
+    b = exec_one(
+        conn, "SELECT area_ha FROM geographic_boundaries WHERE boundary_id=?", (boundary_id,)
+    )
     if not b:
         raise ValueError(f"Unknown boundary_id: {boundary_id}")
     area_ha = float(b["area_ha"] or 0.0)
@@ -86,8 +87,12 @@ def materialize_boundary_daily_features(
         """,
         (boundary_id,),
     )
-    soil_pi_mean = float(soil_stats["pi_mean"]) if soil_stats and soil_stats["pi_mean"] is not None else None
-    soil_awc_mean = float(soil_stats["awc_mean"]) if soil_stats and soil_stats["awc_mean"] is not None else None
+    soil_pi_mean = (
+        float(soil_stats["pi_mean"]) if soil_stats and soil_stats["pi_mean"] is not None else None
+    )
+    soil_awc_mean = (
+        float(soil_stats["awc_mean"]) if soil_stats and soil_stats["awc_mean"] is not None else None
+    )
 
     soil_ver = exec_one(
         conn,
@@ -237,4 +242,6 @@ def materialize_boundary_daily_features(
         )
         inserted += 1
 
-    return MaterializeResult(inserted=inserted, missing_weather_days=missing_weather, missing_rap_days=missing_rap)
+    return MaterializeResult(
+        inserted=inserted, missing_weather_days=missing_weather, missing_rap_days=missing_rap
+    )
