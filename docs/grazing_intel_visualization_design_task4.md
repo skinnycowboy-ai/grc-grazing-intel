@@ -294,13 +294,13 @@ Even though this is a UI doc, the design assumes a stable “run contract” so 
 
 ---
 
-## 11) AI Tools Used (fill-in for submission)
+## 11) AI Tools Used
 
-- **Tool:** ChatGPT  
+- **Tool:** openai ChatGPT  
   **Purpose:** Drafted the visualization design spec and ASCII wireframes.  
-  **What I refined:** (you)  
+  **What I refined:** (MTI)  
   - Adjusted thresholds / copy tone / terminology to match PastureMap patterns  
   - Verified the UX states map cleanly to pipeline freshness/completeness outputs  
-  **What I verified manually:** (you)  
+  **What I verified manually:** (MTI)  
   - Screens match PastureMap navigation expectations  
   - Confidence logic and stale/blocked thresholds align with data availability realities

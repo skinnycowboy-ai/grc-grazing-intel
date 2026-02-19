@@ -305,3 +305,21 @@ out/
 ```
 
 **Important:** do not commit `out/pipeline.db` (derived artifact).
+
+---
+
+## 11) AI Tools Used
+
+- **Tool:** OpenAI ChatGPT / Codex and Anthropic Claude Code  
+  **Purpose:** Used as an accelerator for design review, documentation drafting, and code/architecture sanity checks (not a substitute for implementation judgment).
+
+  **What I refined (MTI):**
+  - Reworked AI-drafted sections to match the assignment rubric (reproducibility, idempotency/backfills, DQ gates, lineage/provenance, operability).
+  - Replaced generic phrasing with concrete run contracts, keys, and failure modes that are testable and auditable.
+  - Tightened the UX/design write-up to be decision-first for ranchers while still exposing provenance (run ids, timestamps, logic versions).
+
+  **What I verified manually (MTI):**
+  - Ran the pipeline end-to-end locally and validated expected tables/row counts for the demo timeframe.
+  - Re-ran ingestion/compute to confirm idempotency semantics (no duplicate rows; partitions replaced as expected).
+  - Validated monitoring exit codes and that DQ failures surface deterministically.
+  - Ran markdownlint over repo docs and corrected lint failures to keep the repo reviewer-friendly.
