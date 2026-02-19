@@ -125,7 +125,9 @@ def ingest(
                 (boundary.boundary_id,),
             )
             boundary_ranch_id = existing["ranch_id"] if existing and existing["ranch_id"] else None
-            boundary_pasture_id = existing["pasture_id"] if existing and existing["pasture_id"] else None
+            boundary_pasture_id = (
+                existing["pasture_id"] if existing and existing["pasture_id"] else None
+            )
 
             if not boundary_pasture_id:
                 boundary_pasture_id = _infer_pasture_id_from_boundary_id(boundary.boundary_id)
@@ -150,7 +152,11 @@ def ingest(
             all_herds = load_herd_configs(herds_json, valid_from=start)
             herds: list[dict] = []
             for h in all_herds:
-                if boundary_pasture_id and h.get("pasture_id") and h.get("pasture_id") != boundary_pasture_id:
+                if (
+                    boundary_pasture_id
+                    and h.get("pasture_id")
+                    and h.get("pasture_id") != boundary_pasture_id
+                ):
                     continue
                 if not h.get("boundary_id"):
                     h["boundary_id"] = boundary.boundary_id
@@ -194,8 +200,12 @@ def ingest(
                 check_herd_config_valid(herd_for_check),
                 check_has_rap_for_boundary(conn, boundary_id=boundary.boundary_id),
                 check_has_soil_for_boundary(conn, boundary_id=boundary.boundary_id),
-                check_weather_freshness(conn, boundary_id=boundary.boundary_id, timeframe_end=end, cfg=cfg),
-                check_daily_features_complete(conn, boundary_id=boundary.boundary_id, start=start, end=end),
+                check_weather_freshness(
+                    conn, boundary_id=boundary.boundary_id, timeframe_end=end, cfg=cfg
+                ),
+                check_daily_features_complete(
+                    conn, boundary_id=boundary.boundary_id, start=start, end=end
+                ),
             ]
 
             for c in checks:
@@ -244,7 +254,10 @@ def compute(
 ):
     now = utc_now_iso()
     cfg = PipelineConfig()
-    ds_params = {"max_days_remaining": cfg.max_days_remaining, "min_days_remaining": cfg.min_days_remaining}
+    ds_params = {
+        "max_days_remaining": cfg.max_days_remaining,
+        "min_days_remaining": cfg.min_days_remaining,
+    }
     config_hash = sha256_text(stable_json_dumps(ds_params))
 
     with db_conn(db) as conn:
@@ -257,13 +270,21 @@ def compute(
             (logic_version, "Rules-based days remaining calculator", "{}", now, now),
         )
 
-        b = exec_one(conn, "SELECT geometry_geojson FROM geographic_boundaries WHERE boundary_id=?", (boundary_id,))
+        b = exec_one(
+            conn,
+            "SELECT geometry_geojson FROM geographic_boundaries WHERE boundary_id=?",
+            (boundary_id,),
+        )
         if not b:
             raise typer.BadParameter(f"Unknown boundary_id: {boundary_id}")
         boundary_geojson = b["geometry_geojson"] or ""
         boundary_hash = sha256_text(boundary_geojson)
 
-        h = exec_one(conn, "SELECT config_snapshot_json FROM herd_configurations WHERE id=?", (herd_config_id,))
+        h = exec_one(
+            conn,
+            "SELECT config_snapshot_json FROM herd_configurations WHERE id=?",
+            (herd_config_id,),
+        )
         if not h:
             raise typer.BadParameter(f"Unknown herd_config_id: {herd_config_id}")
         herd_snapshot = h["config_snapshot_json"] or "{}"
@@ -287,7 +308,11 @@ def compute(
             """,
             (boundary_id, as_of),
         )
-        soil = exec_one(conn, "SELECT source_version FROM nrcs_soil_data WHERE boundary_id=? LIMIT 1", (boundary_id,))
+        soil = exec_one(
+            conn,
+            "SELECT source_version FROM nrcs_soil_data WHERE boundary_id=? LIMIT 1",
+            (boundary_id,),
+        )
 
         input_versions = {
             "rap": {
@@ -333,7 +358,9 @@ def compute(
 
         dq = {
             "guardrails": {
-                "days_remaining_in_range": (cfg.min_days_remaining <= calc.days_remaining <= cfg.max_days_remaining)
+                "days_remaining_in_range": (
+                    cfg.min_days_remaining <= calc.days_remaining <= cfg.max_days_remaining
+                )
             }
         }
         manifest = RunManifest(
@@ -356,7 +383,11 @@ def compute(
 
         typer.echo(
             json.dumps(
-                {"recommendation_id": rec_id, "snapshot_id": snap_id, "manifest_path": str(out_path)},
+                {
+                    "recommendation_id": rec_id,
+                    "snapshot_id": snap_id,
+                    "manifest_path": str(out_path),
+                },
                 indent=2,
             )
         )

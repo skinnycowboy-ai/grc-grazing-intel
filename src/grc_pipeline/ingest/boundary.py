@@ -83,7 +83,9 @@ def _geodetic_area_ha(shp) -> float:
     if not shp.is_valid:
         shp = shp.buffer(0)
     if not shp.is_valid:
-        raise ValueError("Boundary geometry is invalid and could not be repaired (buffer(0) failed)")
+        raise ValueError(
+            "Boundary geometry is invalid and could not be repaired (buffer(0) failed)"
+        )
 
     geom_type = shp.geom_type
     if geom_type == "Polygon":

@@ -26,18 +26,24 @@ def check_herd_config_valid(herd: dict) -> CheckResult:
 
 
 def check_has_rap_for_boundary(conn, *, boundary_id: str) -> CheckResult:
-    row = exec_one(conn, "SELECT COUNT(*) AS n FROM rap_biomass WHERE boundary_id=?", (boundary_id,))
+    row = exec_one(
+        conn, "SELECT COUNT(*) AS n FROM rap_biomass WHERE boundary_id=?", (boundary_id,)
+    )
     n = int(row["n"]) if row else 0
     return CheckResult("rap_present", "completeness", n > 0, {"count": n})
 
 
 def check_has_soil_for_boundary(conn, *, boundary_id: str) -> CheckResult:
-    row = exec_one(conn, "SELECT COUNT(*) AS n FROM nrcs_soil_data WHERE boundary_id=?", (boundary_id,))
+    row = exec_one(
+        conn, "SELECT COUNT(*) AS n FROM nrcs_soil_data WHERE boundary_id=?", (boundary_id,)
+    )
     n = int(row["n"]) if row else 0
     return CheckResult("soil_present", "completeness", n > 0, {"count": n})
 
 
-def check_weather_freshness(conn, *, boundary_id: str, timeframe_end: str, cfg: PipelineConfig) -> CheckResult:
+def check_weather_freshness(
+    conn, *, boundary_id: str, timeframe_end: str, cfg: PipelineConfig
+) -> CheckResult:
     end = parse_date(timeframe_end)
     min_expected = (end - cfg.weather_stale_delta).isoformat()
     row = exec_one(
@@ -84,7 +90,9 @@ def check_daily_features_complete(conn, *, boundary_id: str, start: str, end: st
 
     n = int(row["n"]) if row and row["n"] is not None else 0
     rap_missing = int(row["rap_missing"]) if row and row["rap_missing"] is not None else 0
-    weather_missing = int(row["weather_missing"]) if row and row["weather_missing"] is not None else 0
+    weather_missing = (
+        int(row["weather_missing"]) if row and row["weather_missing"] is not None else 0
+    )
 
     # Pass criteria:
     # - we produced a complete daily frame (n == expected)
