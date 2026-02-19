@@ -317,13 +317,15 @@ def compute(
 
     with db_conn(db) as conn:
         conn.execute(
-            """            CREATE UNIQUE INDEX IF NOT EXISTS uq_grazing_reco_idempotent
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_grazing_reco_idempotent
             ON grazing_recommendations(boundary_id, herd_config_id, calculation_date, model_version, config_version)
             """
         )
 
         conn.execute(
-            """            INSERT INTO model_versions(version_id, description, parameters_json, deployed_at, created_at)
+            """
+            INSERT INTO model_versions(version_id, description, parameters_json, deployed_at, created_at)
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(version_id) DO NOTHING
             """,
@@ -358,7 +360,8 @@ def compute(
 
         feat = exec_one(
             conn,
-            """            SELECT rap_composite_date, rap_source_version, soil_source_version, weather_source_version
+            """
+            SELECT rap_composite_date, rap_source_version, soil_source_version, weather_source_version
             FROM boundary_daily_features
             WHERE boundary_id=? AND feature_date=?
             LIMIT 1
@@ -407,7 +410,8 @@ def compute(
         )
 
         conn.execute(
-            """            INSERT INTO grazing_recommendations(
+            """
+            INSERT INTO grazing_recommendations(
               boundary_id, herd_config_id, calculation_date,
               available_forage_kg, daily_consumption_kg, days_of_grazing_remaining, recommended_move_date,
               model_version, config_version, input_data_versions_json, created_at
@@ -438,7 +442,8 @@ def compute(
 
         rec = exec_one(
             conn,
-            """            SELECT id FROM grazing_recommendations
+            """
+            SELECT id FROM grazing_recommendations
             WHERE boundary_id=? AND herd_config_id=? AND calculation_date=? AND model_version=? AND config_version=?
             """,
             (boundary_id, herd_config_id, as_of, logic_version, config_hash),
