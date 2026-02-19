@@ -2,9 +2,9 @@
 
 This document captures the **Task 6** implementation contract and the **green, end-to-end smoke test** that validates:
 
-- **Idempotent compute**: repeated `compute` with the same inputs/version key returns the same DB row + same manifest.
+- **Idempotent compute**: repeated `compute` with the same version key returns the same DB row + same manifest.
 - **Immutable manifests**: manifests are written once and never mutated.
-- **Explainability**: `explain` reconstructs the “why” from the manifest snapshot and includes **RAP + boundary derived_from**.
+- **Explainability**: `explain` reconstructs the “why” from the manifest snapshot and includes **RAP + boundary `derived_from`**.
 - **Drift guard**: if underlying inputs drift while the version key stays the same, the pipeline **refuses to overwrite history**.
 
 ---
@@ -28,20 +28,25 @@ When `compute` runs it creates:
 
 ```text
 out/manifests/{boundary_id}/{as_of}_{snapshot_id}.json
-
 ```
 
 1. A thin provenance pointer stored in `grazing_recommendations.input_data_versions_json` that includes:
 
-   - `manifest.path` + `manifest.snapshot_id`
-   - data snapshot versions (RAP/soil/weather)
-   - boundary + herd snapshot hashes
-   - `logic_version`, `config_hash`
-   - code version (`git_commit`, `package_version`)
+- `manifest.path` + `manifest.snapshot_id`
+- data snapshot versions (RAP/soil/weather)
+- boundary + herd snapshot hashes
+- `logic_version`, `config_hash`
+- code version (`git_commit`, `package_version`)
 
 ### Drift guard
 
-If a recommendation already exists under the same `(boundary_id, herd_config_id, as_of, logic_version, config_hash)` but the computed provenance payload differs, `compute` exits non-zero with:
+If a recommendation already exists under the same:
+
+```text
+(boundary_id, herd_config_id, as_of, logic_version, config_hash)
+```
+
+…but the newly computed provenance payload differs, `compute` exits non-zero with:
 
 > Existing recommendation already present with DIFFERENT provenance … Refusing to overwrite history.
 
@@ -76,8 +81,16 @@ pytest -q
 ## ✅ Green end-to-end smoke test
 
 > This is the “reviewer-ready” reproducibility proof.
+It validates:
+
+- ingestion produces the expected features rows
+- compute is idempotent (DB row + manifest path/hash stable)
+- explain is backed by the manifest and includes RAP + boundary provenance
+- drift guard trips on silent input mutation
 
 ```bash
+set -euo pipefail
+
 rm -rf out
 mkdir -p out
 cp pasture_reference.db out/pipeline_smoke.db
@@ -88,14 +101,7 @@ START="2024-01-01"
 END="2024-12-31"
 ASOF="2024-12-18"
 
-python -m grc_pipeline.cli ingest \
-  --db "$DB" \
-  --boundary-geojson sample_boundary.geojson \
-  --boundary-id "$BID" \
-  --boundary-crs EPSG:4326 \
-  --herds-json sample_herds_pasturemap.json \
-  --start "$START" \
-  --end "$END"
+python -m grc_pipeline.cli ingest   --db "$DB"   --boundary-geojson sample_boundary.geojson   --boundary-id "$BID"   --boundary-crs EPSG:4326   --herds-json sample_herds_pasturemap.json   --start "$START"   --end "$END"
 
 sqlite3 "$DB" "select status,records_ingested from ingestion_runs order by started_at desc limit 1;"
 sqlite3 "$DB" "select count(*) from boundary_daily_features where boundary_id='$BID' and feature_date between '$START' and '$END';"
@@ -104,11 +110,7 @@ sqlite3 "$DB" "select count(*) from boundary_daily_features where boundary_id='$
 HID="$(sqlite3 "$DB" "select id from herd_configurations where boundary_id='$BID' order by created_at desc limit 1;")"
 echo "HID=$HID"
 
-python -m grc_pipeline.cli compute \
-  --db "$DB" \
-  --boundary-id "$BID" \
-  --herd-config-id "$HID" \
-  --as-of "$ASOF" | tee out/compute_1.json
+python -m grc_pipeline.cli compute   --db "$DB"   --boundary-id "$BID"   --herd-config-id "$HID"   --as-of "$ASOF" | tee out/compute_1.json
 
 RID1="$(python -c 'import json;print(json.load(open("out/compute_1.json"))["recommendation_id"])')"
 MP1="$(python -c 'import json;print(json.load(open("out/compute_1.json"))["manifest_path"])')"
@@ -117,11 +119,7 @@ test -f "$MP1" && echo "✅ manifest exists"
 sha256sum "$MP1" | tee out/manifest_1.sha256
 
 # Idempotent rerun should be identical (same recommendation_id, same manifest hash)
-python -m grc_pipeline.cli compute \
-  --db "$DB" \
-  --boundary-id "$BID" \
-  --herd-config-id "$HID" \
-  --as-of "$ASOF" | tee out/compute_2.json
+python -m grc_pipeline.cli compute   --db "$DB"   --boundary-id "$BID"   --herd-config-id "$HID"   --as-of "$ASOF" | tee out/compute_2.json
 
 RID2="$(python -c 'import json;print(json.load(open("out/compute_2.json"))["recommendation_id"])')"
 MP2="$(python -c 'import json;print(json.load(open("out/compute_2.json"))["manifest_path"])')"
@@ -130,7 +128,7 @@ test "$MP1" = "$MP2" && echo "✅ same manifest path"
 sha256sum "$MP1" | tee out/manifest_2.sha256
 diff -u out/manifest_1.sha256 out/manifest_2.sha256 && echo "✅ manifest unchanged"
 
-# Explain should now include non-null derived_from.rap and derived_from.boundary
+# Explain should include non-null derived_from.rap and derived_from.boundary
 python -m grc_pipeline.cli explain --db "$DB" --recommendation-id "$RID1" | tee out/explain.json
 
 python - <<'PY'
@@ -159,8 +157,8 @@ test "$RC" -ne 0 && echo "✅ drift guard triggered (exit=$RC)"
 
 ### Expected “green” signals
 
-- `ingestion_runs` ends `succeeded|734`
-- `boundary_daily_features` count is `366` for the 2024 date window
+- `ingestion_runs` ends in `succeeded|…`
+- `boundary_daily_features` count is `366` for the 2024 date window (2024 is leap year).
 - `compute` rerun prints:
   - `✅ same recommendation_id`
   - `✅ manifest unchanged`
@@ -174,10 +172,10 @@ test "$RC" -ne 0 && echo "✅ drift guard triggered (exit=$RC)"
 ## Notes for reviewers
 
 - The **manifest** is the durable “evidence pack” for a recommendation:
-  - It contains the full inputs snapshot (boundary hash, herd snapshot hash, the features row, and logic provenance),
-  - the output values,
+  - full input snapshot (boundary hash, herd snapshot hash, features row, and logic provenance),
+  - output values,
   - data snapshot versions (RAP/soil/weather),
-  - and the code version.
+  - code version (`git_commit`, `package_version`).
 
 - The **DB row** stores minimal pointers/hashes only (no large blobs).
 - Any meaningful change to logic requires bumping `logic_version` (e.g. `days_remaining:v2`).
@@ -190,11 +188,3 @@ test "$RC" -ne 0 && echo "✅ drift guard triggered (exit=$RC)"
 ```bash
 rm -rf out
 ```
-
----
-
-## AI Tools Used
-
-- **OpenAI/Claude Code**: reviewed repo patterns and proposed an immutable versioning + manifest strategy; produced `compute`/`explain` design and drafted this reviewer doc.
-- **What I changed/refined**: adjusted idempotency semantics to eliminate overwrite, added deterministic snapshot identity, and clarified the “why” query interface.
-- **What I verified manually**: `pytest`; two consecutive `compute` runs produce one DB row + one manifest; `explain` prints formula + provenance and references the manifest.

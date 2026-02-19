@@ -310,16 +310,33 @@ out/
 
 ## AI Tools Used
 
-- **Tool:** OpenAI ChatGPT / Codex and Anthropic Claude Code  
-  **Purpose:** Used as an accelerator for design review, documentation drafting, and code/architecture sanity checks (not a substitute for implementation judgment).
+- **Tool:** OpenAI ChatGPT / Codex and Anthropic Claude Code.
+
+  **Purpose:**
+
+  - Used as an accelerator for design review, documentation drafting, and code/architecture sanity checks (not a substitute for implementation judgment).
+  - Reviewed repo patterns and proposed an immutable versioning + manifest strategy; produced `compute`/`explain` design and drafted this reviewer doc.
+  - Design review and articulation of CI/CD safety patterns (tests, rollout/rollback, provenance).
+  - Drafted the visualization design spec and ASCII wireframes.
 
   **What I refined (MTI):**
   - Reworked AI-drafted sections to match the assignment rubric (reproducibility, idempotency/backfills, DQ gates, lineage/provenance, operability).
   - Replaced generic phrasing with concrete run contracts, keys, and failure modes that are testable and auditable.
   - Tightened the UX/design write-up to be decision-first for ranchers while still exposing provenance (run ids, timestamps, logic versions).
+  - adjusted idempotency semantics to eliminate overwrite, added deterministic snapshot identity, and clarified the “why” query interface.
+  - Anchored the design to MRV-grade traceability (immutable artifacts, promotion without rebuild, provenance fields).
+  - Chose pragmatic runtime options (ECS default + ROSA as OpenShift-aligned alternative) with explicit cost/safety tradeoffs.
+  - Defined concrete rollback triggers including business guardrails, not just infrastructure metrics.
+  - Adjusted thresholds / copy tone / terminology to match PastureMap patterns.  
+  - Verified the UX states map cleanly to pipeline freshness/completeness outputs.
 
   **What I verified manually (MTI):**
   - Ran the pipeline end-to-end locally and validated expected tables/row counts for the demo timeframe.
   - Re-ran ingestion/compute to confirm idempotency semantics (no duplicate rows; partitions replaced as expected).
   - Validated monitoring exit codes and that DQ failures surface deterministically.
   - Ran markdownlint over repo docs and corrected lint failures to keep the repo reviewer-friendly.
+  - pytest`; two consecutive`compute` runs produce one DB row + one manifest; `explain` prints formula + provenance and references the manifest.
+  - Confirmed the proposed test layers map to actual repo primitives (unit/integration/golden, DB join semantics, API contracts).
+  - Ensured the deployment design supports deterministic replay and audit narratives via `run_id` and version metadata.
+  - Screens match PastureMap navigation expectations.
+  - Confidence logic and stale/blocked thresholds align with data availability realities.
