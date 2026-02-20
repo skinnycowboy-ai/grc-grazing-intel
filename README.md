@@ -41,7 +41,7 @@ Part 1 “deliverables” (reviewer-friendly artifacts):
 - Reference DB (`pasture_reference.db`) containing:
   - NRCS gSSURGO soil attributes (static)
   - RAP biomass composites (sparse time series)
-- Live weather from Open‑Meteo (daily)
+- Live weather from Open‑Meteo (**fetched at ingest time; “daily” when scheduled**)
 
 ## **Core artifacts**
 
@@ -56,6 +56,25 @@ Part 1 “deliverables” (reviewer-friendly artifacts):
 2. `compute` → generate (or reuse) a recommendation + write a manifest
 3. `monitor` → evaluate DQ + output guardrails over a rolling window (exit codes)
 4. `serve` → FastAPI endpoint over the stored recommendations
+
+### Scheduling note (what “daily Open‑Meteo” means)
+
+- The repo includes a **minimal Airflow DAG skeleton** at `airflow/dags/grazing_intel_dag.py` scheduled `@daily`.
+- That DAG runs `ingest` for a **rolling 30‑day window ending on Airflow `ds`** (`--end {{ ds }}`), which triggers a **live Open‑Meteo HTTP fetch** during each run.
+- This repo does **not** deploy Airflow; “daily” happens only if you run the DAG (or cron the CLI).
+
+#### Quick verification (prove weather was refreshed)
+
+```bash
+DB="out/pipeline_smoke.db"
+BID="boundary_north_paddock_3"
+sqlite3 "$DB" "
+  SELECT MAX(ingested_at) AS last_ingested_at,
+         MAX(forecast_date) AS max_forecast_date
+  FROM weather_forecasts
+  WHERE boundary_id='$BID';
+"
+```
 
 ---
 
