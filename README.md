@@ -1,171 +1,57 @@
 # GRC Grazing Intelligence (Part 1 Take‑Home)
 
 Production‑grade, reproducible *grazing intelligence* pipeline using **SQLite + Airflow patterns** (local CLI + minimal DAG skeleton).  
-Focus: pipeline design, versioning, lineage, auditability, and operability — **not** ML modeling.
+Focus: **pipeline design, versioning, lineage, auditability, and operability** — *not* ML sophistication.
 
 > Repo visibility note: This repo is a **fork** of `pasturemap/ml-test`. GitHub does **not** allow changing a fork from public → private, so it remains public for reviewer access.
 
 ---
 
-## What this pipeline does
+## Architecture at a glance
 
-Given a **boundary GeoJSON** + **timeframe** (e.g. 2024 calendar year), the pipeline **ingests and joins**:
+## **Inputs**
 
-- **NRCS gSSURGO** soil attributes (static by boundary) — from the provided reference DB (`pasture_reference.db`)
-- **RAP biomass** time series by boundary (sparse composites) — from the provided reference DB
-- **Open‑Meteo** daily weather — fetched live and stored (daily rows)
-- **Herd config** from PastureMap JSON — parsed and stored in `herd_configurations`
+- Boundary GeoJSON (sample polygons in repo)
+- PastureMap-style herd config JSON (`sample_herds_pasturemap.json`)
+- Reference DB (`pasture_reference.db`) containing:
+  - NRCS gSSURGO soil attributes (static)
+  - RAP biomass composites (sparse time series)
+- Live weather from Open‑Meteo (daily)
 
-It materializes a joined daily feature frame for the timeframe:
+## **Core artifacts**
 
-- `boundary_daily_features` = **(soil static) + (RAP as‑of) + (weather daily)** per boundary per day
+- SQLite tables (canonical schema in `schema.sql`)
+- `boundary_daily_features`: joined daily feature frame per boundary per day
+- `grazing_recommendations`: computed outputs (rules-based)
+- `out/manifests/.../*.json`: immutable run manifest (hashes + versions + params)
 
-Then it computes a rules‑based recommendation:
+## **Pipeline boundaries (schedulable, idempotent)**
 
-### Days of grazing remaining (rules-based)
-
-```text
-days_remaining = available_forage_kg / daily_herd_consumption_kg
-```
-
-Outputs:
-
-- a row in `grazing_recommendations`
-- a JSON **manifest** under `out/manifests/...` (audit spine: hashes + source versions + parameters)
-
----
-
-## Task 1 alignment: CRS + temporal joins + idempotent ingestion
-
-### Coordinate system alignment (CRS)
-
-- **Internal canonical CRS:** EPSG:4326 (WGS84 lon/lat)
-- **Input GeoJSON default:** assumed EPSG:4326 **unless** you pass `--boundary-crs`
-- If your GeoJSON coordinates are projected (UTM/etc), pass `--boundary-crs EPSG:xxxx` and the pipeline will transform to EPSG:4326 before storing.
-- Geometry types supported: `Polygon` and `MultiPolygon`
-- Validation: bounds are checked for EPSG:4326 plausibility; invalid geometries are repaired with `buffer(0)` where possible.
-
-CLI flag:
-
-```bash
---boundary-crs EPSG:4326
-```
-
-### Temporal joins (static + time-series)
-
-Materialized table: `boundary_daily_features(boundary_id, feature_date, …)`
-
-Join semantics for each `feature_date` in `[start, end]`:
-
-- **Weather (Open‑Meteo):** exact join on `forecast_date = feature_date`
-  - Missing weather for any day is a **DQ failure**
-- **RAP biomass:** **as‑of join** using the latest composite where `composite_date <= feature_date`
-  - No interpolation; the composite is treated as the “most recent known” value
-  - If RAP is missing for **all** days in the timeframe, this is a **DQ failure**
-- **Soil:** static summary by boundary (simple mean of selected attributes across rows)
-  - Note: this is intentionally simplified for the take‑home; production would typically use area‑weighted SSURGO component aggregation.
-
-### Idempotency & backfills
-
-The ingestion command is safe to rerun:
-
-- `weather_forecasts` uses **partition replace** per `(boundary_id, source_version, [start,end])`
-- `boundary_daily_features` uses **partition replace** per `(boundary_id, [start,end])`
-- `herd_configurations` uses deterministic IDs (stable across reruns)
-
-Backfills: run `ingest` for any other timeframe; the relevant partitions are rebuilt deterministically.
+1. `ingest` → fetch/parse/load + materialize daily features for a timeframe
+2. `compute` → generate (or reuse) a recommendation + write a manifest
+3. `monitor` → evaluate DQ + output guardrails over a rolling window (exit codes)
+4. `serve` → FastAPI endpoint over the stored recommendations
 
 ---
 
-## Task 2 alignment: deployed “Days Remaining” logic (idempotent compute)
+## Task 1–3 mapping
 
-- Logic lives in `src/grc_pipeline/logic/days_remaining.py`
-- Deployment pattern:
-  - exposed via CLI command `compute`
-  - served via API route `/v1/recommendations/{boundary_id}`
-- Compute idempotency key:
-  - `(boundary_id, herd_config_id, calculation_date, logic_version, config_hash)`
-  - enforced with a **unique index** and `INSERT ... ON CONFLICT DO UPDATE`
+Tasks 1–3 are summarized in this README for fast review, and expanded in dedicated docs:
+
+- Task 01: `docs/part1/task-01-data-ingestion.md`
+- Task 02: `docs/part1/task-02-model-deployment.md`
+- Task 03: `docs/part1/task-03-validation-monitoring.md`
 
 ---
 
-## Task 3 alignment: validation + monitoring (no labels required)
+## Quickstart
 
-### Ingestion data quality (implemented)
-
-Checks are recorded per ingestion run in `data_quality_checks` and summarized in `ingestion_runs.status`:
-
-- `herd_config_valid` — animal_count > 0 and daily_intake_kg_per_head > 0
-- `rap_present` — RAP rows exist for boundary
-- `rap_fresh_enough` — latest RAP composite is within `cfg.rap_stale_days` of `timeframe_end` (warning if violated)
-- `soil_present` — soil rows exist for boundary
-- `weather_fresh_enough` — weather covers at least `timeframe_end - cfg.weather_stale_days`
-- `daily_features_complete` — materialized join has:
-  - expected number of days
-  - no missing weather days
-  - RAP not missing for all days
-
-This covers:
-
-- **missing API responses**: weather gaps show up as `daily_features_complete = failed`
-- **stale data**: `weather_fresh_enough` and `rap_fresh_enough`
-- **invalid configs**: `herd_config_valid`
-
-### Output monitoring over time (implemented)
-
-Without labels, monitor the **shape** and **guardrails** of outputs over a rolling window:
-
-- % of recommendations with `days_remaining <= 0` (indicates likely data/config issues)
-- % of recommendations with `days_remaining > cfg.max_days_remaining` (outliers)
-- p95 RAP staleness (calculation_date − as_of_composite_date)
-
-Command (writes a JSON report under `out/monitoring/...` and sets exit codes):
-
-```bash
-python -m grc_pipeline.cli monitor   --db out/pipeline.db   --boundary-id boundary_north_paddock_3   --end 2024-12-31   --window-days 30
-```
-
-Exit codes (escalation logic):
-
-- `0` = OK
-- `1` = WARN (page a human in business hours)
-- `2` = CRIT (page immediately / stop the line)
-
-This makes the monitor runnable via Airflow/cron and easy to wire into alerting.
-
----
-
-## Repo layout
-
-```text
-.
-├── src/grc_pipeline/            # library + CLI
-│   ├── api/                     # FastAPI app
-│   ├── ingest/                  # boundary/herd/weather loaders + feature join
-│   ├── logic/                   # days remaining calculator
-│   ├── quality/                 # DQ checks + monitoring
-│   ├── store/                   # sqlite helpers + run manifest
-│   ├── cli.py                   # typer commands: ingest / compute / monitor / serve
-│   └── config.py                # thresholds + versions
-├── airflow/                     # minimal DAG skeleton (docs-first)
-├── docs/                        # notes + diagrams
-├── tests/                       # unit + small integration coverage
-├── pasture_reference.db         # provided baseline DB (keep pristine)
-├── schema.sql                   # canonical schema (docs + reviewer convenience)
-├── sample_boundary*.geojson
-└── sample_herds_pasturemap.json
-```
-
----
-
-## Requirements
+### Requirements
 
 - Python **3.12**
-- Optional tools: `sqlite3`, `jq`, `curl`
+- Optional tools: `sqlite3`, `jq`, `curl`, `docker`
 
----
-
-## Install (recommended)
+### Install (recommended)
 
 ```bash
 python3 -m venv .venv
@@ -174,169 +60,137 @@ python -m pip install -U pip
 python -m pip install -e ".[dev]"
 ```
 
----
-
-## Run: end-to-end demo
-
-### 0) Create a working DB (don’t mutate the baseline)
+### Smoke test (end-to-end, reproducible)
 
 ```bash
-mkdir -p out
-cp pasture_reference.db out/pipeline.db
-```
+rm -rf out && mkdir -p out
+cp pasture_reference.db out/pipeline_smoke.db
 
-### 1) Ingest (Task 1: pulls + joins)
+DB="out/pipeline_smoke.db"
+BID="boundary_north_paddock_3"
+START="2024-01-01"
+END="2024-12-31"
+ASOF="2024-12-18"
 
-```bash
-python -m grc_pipeline.cli ingest   --db out/pipeline.db   --boundary-geojson sample_boundary.geojson   --boundary-id boundary_north_paddock_3   --boundary-crs EPSG:4326   --herds-json sample_herds_pasturemap.json   --start 2024-01-01   --end 2024-12-31
-```
+python -m grc_pipeline.cli ingest   --db "$DB"   --boundary-geojson sample_boundary.geojson   --boundary-id "$BID"   --boundary-crs EPSG:4326   --herds-json sample_herds_pasturemap.json   --start "$START"   --end "$END"
 
-Validate run:
+HID="$(sqlite3 "$DB" "select id from herd_configurations where boundary_id='$BID' order by created_at desc limit 1;")"
 
-```bash
-sqlite3 out/pipeline.db "
-select run_id,status,started_at,completed_at,records_ingested
-from ingestion_runs
-order by started_at desc
-limit 1;
-"
-```
+python -m grc_pipeline.cli compute   --db "$DB" --boundary-id "$BID" --herd-config-id "$HID" --as-of "$ASOF"
 
-DQ checks for latest run:
+python -m grc_pipeline.cli explain --db "$DB" --recommendation-id 1 | jq
 
-```bash
-sqlite3 out/pipeline.db "
-select check_name, passed, details_json
-from data_quality_checks
-where run_id = (
-  select run_id from ingestion_runs
-  order by started_at desc
-  limit 1
-)
-order by check_name;
-"
-```
-
-Validate join artifact row count (2024 = 366 days):
-
-```bash
-sqlite3 out/pipeline.db "
-select count(*) as n
-from boundary_daily_features
-where boundary_id='boundary_north_paddock_3'
-  and feature_date between '2024-01-01' and '2024-12-31';
-"
+python -m grc_pipeline.cli monitor   --db "$DB" --boundary-id "$BID" --end "$END" --window-days 30
 ```
 
 ---
 
-### 2) Compute recommendation (Task 2)
+## Key architecture decisions
 
-```bash
-python -m grc_pipeline.cli compute   --db out/pipeline.db   --boundary-id boundary_north_paddock_3   --herd-config-id 6400725295db666946d63535   --as-of 2024-12-18
-```
+### 1) SQLite-first + deterministic partitions (reproducible + reviewable)
 
-Inspect:
+- SQLite keeps the take-home **fully local** and easy to review (schema + data + outputs).
+- “Derived” tables are rebuilt via **partition replace** (boundary + date range), making `ingest` safe to rerun and schedulable.
+- The baseline `pasture_reference.db` is kept pristine; smoke tests copy it into `out/`.
 
-```bash
-sqlite3 out/pipeline.db "
-select
-  id,
-  calculation_date,
-  available_forage_kg,
-  daily_consumption_kg,
-  days_of_grazing_remaining,
-  recommended_move_date,
-  model_version,
-  config_version
-from grazing_recommendations
-where boundary_id='boundary_north_paddock_3'
-order by id desc
-limit 1;
-"
-```
+### 2) Explicit join semantics (static + time series)
 
----
+For each `feature_date` in `[start, end]`:
 
-### 3) Monitor output quality (Task 3)
+- **Weather**: exact join on date (missing days are a DQ failure)
+- **RAP**: **as-of join** to the latest composite where `composite_date <= feature_date`
+- **Soil**: static boundary summary (intentionally simplified for this assignment)
 
-```bash
-python -m grc_pipeline.cli monitor   --db out/pipeline.db   --boundary-id boundary_north_paddock_3   --end 2024-12-31   --window-days 30
-```
+This makes the feature frame stable and auditable — you can point at exactly which composite fed each day.
 
----
+### 3) Versioned provenance (manifest as the “audit spine”)
 
-### 4) Serve API
+Every compute run emits a manifest under `out/manifests/...` containing:
 
-```bash
-python -m grc_pipeline.cli serve --db out/pipeline.db --host 127.0.0.1 --port 8001
-```
+- input snapshot identifiers (hashes)
+- `source_version` for RAP/soil/weather
+- `logic_version` and `config_hash`
+- code metadata (git commit + package version)
 
-Smoke test:
+This enables **replay**, “why” explanations, and immutable evidence trails.
 
-```bash
-curl -s "http://127.0.0.1:8001/healthz" | jq
+### 4) Drift guard over “silent overwrite”
 
-curl -s   "http://127.0.0.1:8001/v1/recommendations/boundary_north_paddock_3?herd_config_id=6400725295db666946d63535&as_of=2024-12-18"   | jq
-```
+`compute` is **idempotent** under an explicit key:
+`(boundary_id, herd_config_id, calculation_date, logic_version, config_hash)`.
+
+If the same key is requested but the underlying input snapshot differs, the pipeline **refuses to overwrite history** and requires a version bump (`logic_version` or config change → new `config_hash`). This prevents silent “same ID, different answer”.
+
+### 5) Monitoring without labels (shape + guardrails)
+
+Because we don’t have ground truth labels, output monitoring checks:
+
+- distribution/guardrails of `days_remaining`
+- staleness of key inputs (e.g., RAP composite age)
+- completeness of daily features
+
+`monitor` returns exit codes (OK/WARN/CRIT) to make it schedulable and easy to wire into alerting.
 
 ---
 
-## Airflow scheduling (pattern)
+## Assumptions (explicit)
 
-A minimal DAG stub lives in `airflow/dags/grazing_intel_dag.py` and demonstrates how to schedule:
-
-- `ingest(boundary, [ds-30, ds])` as a parameterized task
-- `compute(boundary, herd_config_id, ds)` downstream
-- `monitor(boundary, ds-30..ds)` downstream (alerts on WARN/CRIT via exit codes)
-
-This repo does not ship a full Airflow runtime; the DAG is intentionally docs-first to show schedulability and idempotent task boundaries.
+- The provided reference DB (`pasture_reference.db`) is treated as the **authoritative** RAP + soil source for the take-home.
+- Soil aggregation is simplified to a boundary-level summary (production would likely do area-weighted SSURGO component aggregation).
+- RAP composites are treated as “last known value” until a newer composite exists (no interpolation).
+- Weather is fetched from Open‑Meteo and stored daily; missing weather days are treated as ingestion failures for the affected partition.
+- The “Days Remaining” logic is intentionally rules-based to emphasize deployment + operability patterns.
 
 ---
 
-## Git hygiene
+## What I’d improve with more time
 
-Example `.gitignore` snippet:
-
-```gitignore
-out/
-*.db
-!pasture_reference.db
-```
-
-**Important:** do not commit `out/pipeline.db` (derived artifact).
+- **Schema migrations** (Alembic-like pattern) and stronger backwards compatibility guarantees for manifests.
+- **More realistic geospatial handling**: area-weighted soil aggregation, explicit CRS validation for more edge cases, boundary simplification options.
+- **Operational instrumentation**: structured logs + metrics export (Prometheus) + trace IDs tied to run/manifest IDs.
+- **Golden test fixtures**: deterministic weather fixture for CI to avoid live API dependence in pipelines beyond smoke tests.
+- **Promotion workflow**: explicit “promote manifest” mechanics to move runs between environments without recomputation.
+- **Multi-tenant boundaries**: boundary registry, RBAC concepts, and API auth (kept out of scope for the take-home).
 
 ---
 
-## AI Tools Used
+## Docs index (Part 1 deliverables)
 
-- **Tool:** OpenAI ChatGPT / Codex and Anthropic Claude Code.
+All Part 1 docs live under `docs/part1/`:
 
-  **Purpose:**
+- Task 01: `task-01-data-ingestion.md`
+- Task 02: `task-02-model-deployment.md`
+- Task 03: `task-03-validation-monitoring.md`
+- Task 04: `task-04-grazing-intel-visualization-design.md`
+- Task 05: `task-05-ci-cd-design.md`
+- Task 06: `task-06-versioning.md`
+- Task 07: `task-07-operational-maturity.md`
+- Reviewer copy of README: `deliverable-01-README.md` (optional convenience)
+- Deliverable diagram: `deliverable-02-architecture-diagram.md`
+- Deliverable runbook: `deliverable-03-runbook.md`
 
-  - Used as an accelerator for design review, documentation drafting, and code/architecture sanity checks (not a substitute for implementation judgment).
-  - Reviewed repo patterns and proposed an immutable versioning + manifest strategy; produced `compute`/`explain` design and drafted this reviewer doc.
-  - Design review and articulation of CI/CD safety patterns (tests, rollout/rollback, provenance).
-  - Drafted the visualization design spec and ASCII wireframes.
+---
 
-  **What I refined (MTI):**
-  - Reworked AI-drafted sections to match the assignment rubric (reproducibility, idempotency/backfills, DQ gates, lineage/provenance, operability).
-  - Replaced generic phrasing with concrete run contracts, keys, and failure modes that are testable and auditable.
-  - Tightened the UX/design write-up to be decision-first for ranchers while still exposing provenance (run ids, timestamps, logic versions).
-  - adjusted idempotency semantics to eliminate overwrite, added deterministic snapshot identity, and clarified the “why” query interface.
-  - Anchored the design to MRV-grade traceability (immutable artifacts, promotion without rebuild, provenance fields).
-  - Chose pragmatic runtime options (ECS default + ROSA as OpenShift-aligned alternative) with explicit cost/safety tradeoffs.
-  - Defined concrete rollback triggers including business guardrails, not just infrastructure metrics.
-  - Adjusted thresholds / copy tone / terminology to match PastureMap patterns.  
-  - Verified the UX states map cleanly to pipeline freshness/completeness outputs.
+## AI Tools Used (transparency)
 
-  **What I verified manually (MTI):**
-  - Ran the pipeline end-to-end locally and validated expected tables/row counts for the demo timeframe.
-  - Re-ran ingestion/compute to confirm idempotency semantics (no duplicate rows; partitions replaced as expected).
-  - Validated monitoring exit codes and that DQ failures surface deterministically.
-  - Ran markdownlint over repo docs and corrected lint failures to keep the repo reviewer-friendly.
-  - pytest`; two consecutive`compute` runs produce one DB row + one manifest; `explain` prints formula + provenance and references the manifest.
-  - Confirmed the proposed test layers map to actual repo primitives (unit/integration/golden, DB join semantics, API contracts).
-  - Ensured the deployment design supports deterministic replay and audit narratives via `run_id` and version metadata.
-  - Screens match PastureMap navigation expectations.
-  - Confidence logic and stale/blocked thresholds align with data availability realities.
+- **Tools:** OpenAI ChatGPT / Codex and Anthropic Claude Code.
+
+## **How they were used**
+
+- Architecture review + tradeoffs (idempotency, versioning, manifest/provenance patterns)
+- Drafting and tightening documentation (turning design intent into reviewer-friendly specs)
+- Fast iteration on CLI ergonomics and edge cases (e.g., drift guard error messages)
+
+## **My judgment and refinement**
+
+- Rewrote AI-drafted sections to match the rubric (reproducibility, idempotency/backfills, DQ gates, lineage/provenance, operability).
+- Replaced generic wording with concrete keys, failure modes, and smoke tests that are auditable.
+- Tightened “why/explain” semantics to reference immutable manifests and explicit source versions.
+- Chose pragmatic rollout/rollback triggers based on business guardrails (not just infra health).
+
+## **What I verified manually**
+
+- `ruff format/check`, `pytest`, and repeated end-to-end smoke tests (ingest → compute → explain → monitor).
+- Verified compute idempotency (two identical computes produce the same recommendation + manifest).
+- Verified drift guard behavior (mutating inputs under the same key triggers a hard failure requiring version bump).
+- Verified container build path expectations (Dockerfile copies root `README.md`).
