@@ -63,11 +63,21 @@ Part 1 “deliverables” (reviewer-friendly artifacts):
 - That DAG runs `ingest` for a **rolling 30‑day window ending on Airflow `ds`** (`--end {{ ds }}`), which triggers a **live Open‑Meteo HTTP fetch** during each run.
 - This repo does **not** deploy Airflow; “daily” happens only if you run the DAG (or cron the CLI).
 
-#### Quick verification (prove weather was refreshed)
+#### Quick verification (prove Open‑Meteo was refreshed)
+
+This creates a fresh DB (copying the reference seed), runs `ingest` for the last 30 days ending today, then queries the latest weather date ingested.
 
 ```bash
-DB="out/pipeline_smoke.db"
+mkdir -p out
+cp pasture_reference.db out/live_weather_check.db
+
+DB="out/live_weather_check.db"
 BID="boundary_north_paddock_3"
+END="$(date -u +%F)"
+START="$(date -u -d '30 days ago' +%F)"
+
+python -m grc_pipeline.cli ingest   --db "$DB"   --boundary-geojson sample_boundary.geojson   --boundary-id "$BID"   --boundary-crs EPSG:4326   --herds-json sample_herds_pasturemap.json   --start "$START"   --end "$END"
+
 sqlite3 "$DB" "
   SELECT MAX(ingested_at) AS last_ingested_at,
          MAX(forecast_date) AS max_forecast_date
@@ -75,6 +85,8 @@ sqlite3 "$DB" "
   WHERE boundary_id='$BID';
 "
 ```
+
+Expected: `max_forecast_date` equals `$END`, and `last_ingested_at` is “now-ish”.
 
 ---
 
