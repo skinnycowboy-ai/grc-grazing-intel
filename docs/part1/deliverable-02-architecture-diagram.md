@@ -2,77 +2,77 @@
 
 > Goal: show end-to-end flow from **sources → SQLite/manifest artifacts → API response**, with explicit **versioning/immutability points** and **DS vs ML Ops ownership boundaries**.
 
-## Mermaid diagram (copy/paste into GitHub or any Mermaid renderer)
+## Mermaid diagram (GitHub-renderable)
 
 ```mermaid
 flowchart LR
   %% =========================
   %% SOURCES
   %% =========================
-  subgraph S[Data Sources]
-    BND[Boundary GeoJSON<br/>sample_boundary.geojson]
-    HERD[Herd Config JSON<br/>sample_herds_pasturemap.json]
-    REF[(Reference DB<br/>pasture_reference.db<br/>RAP + gSSURGO)]
-    OM[Open‑Meteo API<br/>daily weather]
+  subgraph S["Data Sources"]
+    BND["Boundary GeoJSON<br/>sample_boundary.geojson"]
+    HERD["Herd Config JSON<br/>sample_herds_pasturemap.json"]
+    REF["Reference DB (SQLite)<br/>pasture_reference.db<br/>RAP + gSSURGO"]
+    OM["Open-Meteo API<br/>daily weather"]
   end
 
   %% =========================
-  %% INGESTION
+  %% INGESTION (CLI)
   %% =========================
-  subgraph ING[Ingestion Pipeline (CLI: ingest)]
-    I1[Parse/Normalize Boundary<br/>load_boundary_geojson]
-    I2[Upsert Geographic Boundary<br/>geographic_boundaries]
-    I3[Upsert Herd Configs<br/>herd_configurations]
-    I4[Fetch + Upsert Weather<br/>weather_forecasts]
-    I5[Materialize Features (daily)<br/>boundary_daily_features]
-    I6[DQ checks + run record<br/>ingestion_runs + dq_checks]
+  subgraph ING["Ingestion Pipeline (CLI: ingest)"]
+    I1["Parse/Normalize Boundary<br/>load_boundary_geojson"]
+    I2["Upsert Geographic Boundary<br/>geographic_boundaries"]
+    I3["Upsert Herd Configs<br/>herd_configurations"]
+    I4["Fetch + Upsert Weather<br/>weather_forecasts"]
+    I5["Materialize Features (daily)<br/>boundary_daily_features"]
+    I6["DQ checks + run record<br/>ingestion_runs + dq_checks"]
   end
 
   %% =========================
-  %% STORAGE
+  %% STORAGE (DB + IMMUTABLE ARTIFACTS)
   %% =========================
-  subgraph ST[Storage]
-    DB[(SQLite DB)]
-    MF[(Immutable Manifest Files<br/>out/manifests/{boundary}/{asof}_{snapshot}.json)]
+  subgraph ST["Storage"]
+    DB["SQLite DB<br/>(idempotent upserts + append-only facts)"]
+    MF["Immutable Manifest Files<br/>out/manifests/{boundary}/{asof}_{snapshot}.json"]
   end
 
   %% =========================
-  %% COMPUTE
+  %% COMPUTE (CLI)
   %% =========================
-  subgraph CMP[Compute Recommendation (CLI: compute)]
-    C1[Load inputs<br/>boundary + herd + features_row]
-    C2[Compute logic<br/>days_remaining:vN]
-    C3[Create RunManifest<br/>snapshot_id = sha256(stable_json)]
-    C4[Append-only write<br/>grazing_recommendations]
-    C5[Drift guard<br/>refuse overwrite on provenance mismatch]
+  subgraph CMP["Compute Recommendation (CLI: compute)"]
+    C1["Load inputs<br/>boundary + herd + features_row"]
+    C2["Compute logic<br/>days_remaining:vN"]
+    C3["Create Run Manifest<br/>snapshot_id = sha256(stable_json)"]
+    C4["Append-only write<br/>grazing_recommendations"]
+    C5["Drift guard<br/>refuse overwrite on provenance mismatch"]
   end
 
   %% =========================
   %% EXPLAIN / API
   %% =========================
-  subgraph EXP[Explain / API Response]
-    E1[Explain (CLI: explain)<br/>reads DB + manifest]
-    API[Serve (FastAPI)<br/>returns reco + provenance + explanation]
+  subgraph EXP["Explain / API Response"]
+    E1["Explain (CLI: explain)<br/>reads DB + manifest"]
+    API["Serve (FastAPI)<br/>returns reco + provenance + explanation"]
   end
 
   %% =========================
   %% VERSIONING CONTROL PLANE
   %% =========================
-  subgraph VER[Versioning Control Plane]
-    MV[(model_versions table)]
-    LV[logic_version<br/>days_remaining:vN]
-    CH[config_hash<br/>sha256(ds_params + thresholds)]
-    DSNAP[data_snapshot_versions<br/>RAP/gSSURGO/weather versions]
-    SID[snapshot_id<br/>manifest hash]
+  subgraph VER["Versioning Control Plane"]
+    MV["model_versions table"]
+    LV["logic_version<br/>days_remaining:vN"]
+    CH["config_hash<br/>sha256(ds_params + thresholds)"]
+    DSNAP["data_snapshot_versions<br/>RAP/gSSURGO/weather versions"]
+    SID["snapshot_id<br/>manifest hash"]
   end
 
   %% =========================
   %% OWNERSHIP BOUNDARIES
   %% =========================
-  subgraph OWN[Ownership Boundaries]
+  subgraph OWN["Ownership Boundaries"]
     direction TB
-    DS[Data Science owns:<br/>• model logic modules<br/>• parameters + validation thresholds<br/>• logic_version bump policy]
-    MLOPS[ML Ops owns:<br/>• infra + deploy artifacts<br/>• monitoring + alerts<br/>• versioning enforcement + storage<br/>• rollbacks + incident response]
+    DS["Data Science owns:<br/>• model logic modules<br/>• parameters + validation thresholds<br/>• logic_version bump policy"]
+    MLOPS["ML Ops owns:<br/>• infra + deploy artifacts<br/>• monitoring + alerts<br/>• versioning enforcement + storage<br/>• rollbacks + incident response"]
   end
 
   %% =========================
@@ -91,8 +91,8 @@ flowchart LR
   C2 --> LV
   C3 --> DSNAP
   C3 --> CH
-  C4 --> DB
-  C5 --> DB
+  C1 --> C4 --> DB
+  C1 --> C5 --> DB
 
   DB --> E1 --> API
   MF --> E1
