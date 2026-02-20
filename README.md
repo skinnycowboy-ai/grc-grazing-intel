@@ -1,9 +1,34 @@
-# GRC Grazing Intelligence (Part 1 Take‑Home)
+# GRC Grazing Intelligence (Take‑Home: Part 1 + Part 2)
 
 Production‑grade, reproducible *grazing intelligence* pipeline using **SQLite + Airflow patterns** (local CLI + minimal DAG skeleton).  
 Focus: **pipeline design, versioning, lineage, auditability, and operability** — *not* ML sophistication.
 
 > Repo visibility note: This repo is a **fork** of `pasturemap/ml-test`. GitHub does **not** allow changing a fork from public → private, so it remains public for reviewer access.
+
+---
+
+## Where to start (reviewer guide)
+
+### Part 1 — Grazing intelligence pipeline (Tasks 1–7)
+
+- Task 01: `docs/part1/task-01-data-ingestion.md`
+- Task 02: `docs/part1/task-02-model-deployment.md`
+- Task 03: `docs/part1/task-03-validation-monitoring.md`
+- Task 04: `docs/part1/task-04-grazing-intel-visualization-design.md`
+- Task 05: `docs/part1/task-05-ci-cd-design.md`
+- Task 06: `docs/part1/task-06-versioning.md`
+- Task 07: `docs/part1/task-07-operational-maturity.md`
+
+Part 1 “deliverables” (reviewer-friendly artifacts):
+- Reviewer copy of README: `docs/part1/deliverable-01-README.md` (optional convenience)
+- Architecture diagram: `docs/part1/deliverable-02-architecture-diagram.md`
+- Runbook: `docs/part1/deliverable-03-runbook.md`
+
+### Part 2 — Credit verification (deliverables)
+
+- Design doc: `docs/part2/deliverable-01-credit-verification-design.md`
+- Dataflow diagram: `docs/part2/deliverable-02-credit-verification-dataflow-diagram.md`
+- Verification record schema: `docs/part2/deliverable-03-ranch-verification-record.schema.yaml`
 
 ---
 
@@ -34,7 +59,7 @@ Focus: **pipeline design, versioning, lineage, auditability, and operability** �
 
 ---
 
-## Task 1–3 mapping
+## Task 1–3 mapping (Part 1)
 
 Tasks 1–3 are summarized in this README for fast review, and expanded in dedicated docs:
 
@@ -151,23 +176,6 @@ Because we don’t have ground truth labels, output monitoring checks:
 - **Golden test fixtures**: deterministic weather fixture for CI to avoid live API dependence in pipelines beyond smoke tests.
 - **Promotion workflow**: explicit “promote manifest” mechanics to move runs between environments without recomputation.
 - **Multi-tenant boundaries**: boundary registry, RBAC concepts, and API auth (kept out of scope for the take-home).
-
----
-
-## Docs index (Part 1 deliverables)
-
-All Part 1 docs live under `docs/part1/`:
-
-- Task 01: `task-01-data-ingestion.md`
-- Task 02: `task-02-model-deployment.md`
-- Task 03: `task-03-validation-monitoring.md`
-- Task 04: `task-04-grazing-intel-visualization-design.md`
-- Task 05: `task-05-ci-cd-design.md`
-- Task 06: `task-06-versioning.md`
-- Task 07: `task-07-operational-maturity.md`
-- Reviewer copy of README: `deliverable-01-README.md` (optional convenience)
-- Deliverable diagram: `deliverable-02-architecture-diagram.md`
-- Deliverable runbook: `deliverable-03-runbook.md`
 
 ---
 

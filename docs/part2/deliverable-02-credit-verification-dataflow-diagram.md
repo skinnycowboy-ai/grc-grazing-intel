@@ -4,52 +4,66 @@
 
 ```mermaid
 flowchart LR
+  %% =========================
   %% SOURCES
-  subgraph Sources
-    PM[PastureMap\n(paddocks, herd moves, notes, photos)]
-    SF[Salesforce\n(enrollment, protocol, check-ins, case state)]
-    LAB[Soil Lab APIs\n(results, chain-of-custody, sample points)]
-    HW[Hardware Feeds\n(Ranchbot/Halter/etc)]
-    DOCS[GMP / LSA PDFs\n(uploaded docs)]
+  %% =========================
+  subgraph S["Sources"]
+    PM["PastureMap<br/>(paddocks, herd moves, notes, photos)"]
+    SF["Salesforce<br/>(enrollment, protocol, check-ins, case state)"]
+    LAB["Soil Lab APIs<br/>(results, chain-of-custody, sample points)"]
+    HW["Hardware Feeds<br/>(Ranchbot/Halter/etc)"]
+    DOCS["GMP / LSA PDFs<br/>(uploaded docs)"]
   end
 
+  %% =========================
   %% INGESTION + SNAPSHOTS
-  subgraph Ingestion[Connectors + Snapshotting (Ops-owned)]
-    C1[Connector Jobs\n(auth, pull, paginate)]
-    RAW[(Raw Snapshot Store\nobject storage)]
-    META[(Snapshot Index DB\nmetadata + hashes)]
+  %% =========================
+  subgraph ING["Ingestion<br/>(Connectors + Snapshotting — Ops-owned)"]
+    C1["Connector Jobs<br/>(auth, pull, paginate)"]
+    RAW["Raw Snapshot Store<br/>(object storage)"]
+    META["Snapshot Index DB<br/>(metadata + hashes)"]
   end
 
+  %% =========================
   %% NORMALIZATION
-  subgraph Normalize[Normalization + Claim Extraction]
-    N1[Parse + Normalize\n(ids, timestamps, geometries)]
-    EVID[(Evidence Items\n(doc/event/lab-result))]
-    CLAIMS[(Claims\n(machine-checkable assertions))]
-    RECON[Geo Reconciliation\nLSA parcels vs PM paddocks\n+ sampling points coverage]
+  %% =========================
+  subgraph NORM["Normalization + Claim Extraction"]
+    N1["Parse + Normalize<br/>(ids, timestamps, geometries)"]
+    EVID["Evidence Items<br/>(doc/event/lab-result)"]
+    CLAIMS["Claims<br/>(machine-checkable assertions)"]
+    RECON["Geo Reconciliation<br/>LSA parcels vs PM paddocks<br/>+ sampling points coverage"]
   end
 
+  %% =========================
   %% VERIFICATION ENGINE
-  subgraph Verify[Verification Engine (policy-as-code)]
-    GATES[Completeness Gates\nNOT_READY / NEEDS_REVIEW]
-    POLICY[Policy Eval\nGood/Better/Best\n(policy_version)]
-    OUTREC[(Ranch Verification Record\nstatus + tier + metrics)]
-    PACK[(Evidence Pack\nmanifest + report\nhashes + pointers)]
+  %% =========================
+  subgraph VER["Verification Engine<br/>(policy-as-code)"]
+    GATES["Completeness Gates<br/>NOT_READY / NEEDS_REVIEW"]
+    POLICY["Policy Eval<br/>Good/Better/Best<br/>(policy_version)"]
+    OUTREC["Ranch Verification Record<br/>(status + tier + metrics)"]
+    PACK["Evidence Pack<br/>(manifest + report<br/>hashes + pointers)"]
   end
 
+  %% =========================
   %% HUMAN REVIEW
-  subgraph HITL[Human Review (MRV workbench)]
-    UI[Reviewer UI\nqueue + case view]
-    DEC[Approve / Request Info / Override\n(reason + notes + attachments)]
-    AUDIT[(Immutable Audit Log\nappend-only)]
+  %% =========================
+  subgraph HITL["Human Review<br/>(MRV workbench)"]
+    UI["Reviewer UI<br/>queue + case view"]
+    DEC["Approve / Request Info / Override<br/>(reason + notes + attachments)"]
+    AUDIT["Immutable Audit Log<br/>(append-only)"]
   end
 
+  %% =========================
   %% OUTPUTS
-  subgraph Outputs
-    ISS[Credit Issuance System\n(consumes APPROVED_LOCKED records)]
-    API[Verification API\n/read-only queries]
+  %% =========================
+  subgraph OUT["Outputs"]
+    ISS["Credit Issuance System<br/>(consumes APPROVED_LOCKED records)"]
+    API["Verification API<br/>(read-only queries)"]
   end
 
+  %% =========================
   %% FLOWS
+  %% =========================
   PM --> C1
   SF --> C1
   LAB --> C1
@@ -82,15 +96,16 @@ flowchart LR
   OUTREC --> API
   OUTREC --> ISS
 
-  %% VERSIONING / OWNERSHIP ANNOTATIONS
+  %% =========================
+  %% STYLING / OWNERSHIP ANNOTATIONS
+  %% =========================
   classDef ops fill:#f3f4f6,stroke:#111827,stroke-width:1px;
   classDef ds fill:#ecfeff,stroke:#0f766e,stroke-width:1px;
   classDef audit fill:#fff7ed,stroke:#9a3412,stroke-width:1px;
 
-  class Ingestion,RAW,META,C1 ops;
-  class Normalize,N1,EVID,CLAIMS,RECON ds;
-  class Verify,GATES,POLICY,OUTREC,PACK ds;
-  class HITL,UI,DEC audit;
+  class C1,RAW,META ops;
+  class N1,EVID,CLAIMS,RECON,POLICY,GATES,OUTREC,PACK ds;
+  class UI,DEC,AUDIT audit;
 ```
 
 ## Versioning points (what gets pinned in every record)
